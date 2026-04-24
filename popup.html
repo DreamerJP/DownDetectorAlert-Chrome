@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Downdetector Monitor</title>
+<style>
+  @font-face {
+    font-family: 'Syne';
+    src: url('syne-800.ttf') format('truetype');
+    font-weight: 800;
+  }
+  :root {
+    --bg:      #0b0d12;
+    --surface: #13161e;
+    --border:  #1e2230;
+    --text:    #e2e8f0;
+    --muted:   #94a3b8;
+    --muted-bg: #2e364f;
+    --green:   #00e676;
+    --yellow:  #ffca28;
+    --red:     #ff4d4d;
+    --accent:  #4f8fff;
+    --mono:    Consolas, 'Courier New', monospace;
+    --head:    'Syne', 'Trebuchet MS', 'Segoe UI', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { width: 360px; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 12px; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 13px 16px 11px; border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  .logo { font-family: var(--head); font-size: 15px; font-weight: 800; color: #fff; letter-spacing: -.3px; }
+  .logo span { color: var(--accent); }
+  .header-right { display: flex; gap: 8px; align-items: center; }
+  #last-check { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+  button { cursor: pointer; border: none; font-family: var(--mono); font-size: 11px; border-radius: 4px; padding: 5px 10px; transition: all .15s; }
+  button:hover { opacity: .8; }
+  .btn-icon    { background: var(--border); color: var(--text); }
+  .btn-icon:hover { background: var(--muted-bg); opacity: 1; color: #fff; }
+  .btn-primary { background: var(--accent); color: #fff; font-weight: 600; }
+  .btn-small   { background: var(--border); color: var(--text); padding: 3px 8px; font-size: 10px; }
+  .btn-save-wide { width: 100%; padding: 9px 12px; border-radius: 6px; margin-top: 10px; }
+  .btn-remove {
+    width: 30px; height: 30px; padding: 0; border-radius: 6px;
+    background: var(--surface); border: 1px solid var(--border); color: var(--muted);
+    position: relative;
+  }
+  .btn-remove::before {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: 10px; height: 1.5px; background: currentColor; transform: translate(-50%, -50%);
+    border-radius: 999px;
+  }
+  .btn-remove:hover {
+    opacity: 1; color: var(--red); border-color: #ff4d4d40; background: #ff4d4d12;
+  }
+
+  .tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .tab { flex: 1; padding: 8px; text-align: center; cursor: pointer; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; border-bottom: 2px solid transparent; transition: color .15s, border-color .15s; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* ── Status list ── */
+  #status-list { padding: 6px 0; }
+  .svc-row {
+    border-bottom: 1px solid var(--border);
+    animation: fadeIn .2s ease;
+  }
+  .svc-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 16px; cursor: pointer; transition: background .15s;
+  }
+  .svc-header:hover { background: #ffffff05; }
+  .svc-body { display: none; padding: 0 16px 12px; }
+  .svc-row.expanded .svc-body { display: block; animation: fadeIn .2s ease; }
+  .svc-row.expanded .svc-header { background: #ffffff03; }
+
+  .chart-container {
+    height: 54px; margin-top: 6px; position: relative;
+    background: #00000020; border-radius: 4px; overflow: hidden;
+    color: var(--accent); border: 1px solid #ffffff08;
+  }
+  .chart-container.warning { color: var(--yellow); }
+  .chart-container.danger { color: var(--red); }
+  .chart-svg { display: block; width: 100%; height: 100%; }
+  .chart-grid line { stroke: #ffffff12; stroke-width: 1; }
+  .chart-axis { stroke: #ffffff16; stroke-width: 1; }
+  .chart-scale text {
+    fill: var(--muted);
+    font-size: 8px;
+    dominant-baseline: middle;
+  }
+  .chart-line {
+    fill: none; stroke: currentColor; stroke-width: 1.8;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .chart-area { fill: currentColor; }
+  .chart-secondary {
+    fill: none; stroke: #cbd5e155; stroke-width: 1; stroke-dasharray: 3 3;
+  }
+  .chart-baseline {
+    stroke: var(--red); stroke-width: 1; stroke-dasharray: 4 3; opacity: .7;
+  }
+  .chart-label {
+    position: absolute; top: 4px; right: 6px; font-size: 9px; color: #cbd5e1;
+    background: #0b0d12b8; padding: 1px 5px; border-radius: 999px;
+  }
+  .chart-times {
+    display: flex; justify-content: space-between; gap: 6px;
+    margin-top: 4px; color: var(--muted); font-size: 9px;
+  }
+  .chart-empty {
+    font-size:10px; color:var(--muted); text-align:center; padding:8px 6px;
+    border: 1px dashed #ffffff14; border-radius: 4px; margin-top: 6px;
+  }
+
+  @keyframes fadeIn { from { opacity:0; transform:translateY(3px) } to { opacity:1; transform:none } }
+
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .dot.ok      { background: var(--green);  box-shadow: 0 0 7px var(--green); }
+  .dot.warning { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
+  .dot.outage  { background: var(--red);    box-shadow: 0 0 9px var(--red); animation: pulse 1s infinite; }
+  .dot.unknown { background: var(--muted-bg); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  .svc-name { flex: 1; color: #fff; font-weight: 600; font-size: 13px; letter-spacing: 0.2px; }
+
+  .svc-badge {
+    font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 3px;
+    text-transform: uppercase; letter-spacing: .5px; white-space: nowrap;
+  }
+  .badge-ok      { background: #00e67618; color: var(--green); border: 1px solid #00e67640; }
+  .badge-warning { background: #ffca2818; color: var(--yellow); border: 1px solid #ffca2840; }
+  .badge-outage  { background: #ff4d4d18; color: var(--red);   border: 1px solid #ff4d4d40; }
+  .badge-unknown { background: var(--muted-bg); color: var(--text); border: 1px solid var(--border); }
+
+  .svc-detail { font-size: 11px; color: var(--muted); margin-top: 3px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .empty { padding: 28px 16px; text-align: center; color: var(--muted); font-size: 11px; line-height: 2; }
+
+  /* ── Config panel ── */
+  .config-panel { padding: 12px 16px; }
+  .field-group { margin-bottom: 12px; }
+  label { display: block; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 5px; }
+  input[type=number], input[type=text], select {
+    width: 100%; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; color: var(--text); font-family: var(--mono); font-size: 12px;
+    padding: 6px 10px; outline: none; transition: border-color .15s;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+
+  .section-head {
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    margin: 14px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+  .section-title {
+    font-family: var(--head); font-size: 11px; font-weight: 700; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+  .section-meta { color: var(--muted); font-size: 10px; }
+
+  .svc-edit-row, .add-row, .config-labels {
+    display: grid;
+    grid-template-columns: 1fr 1fr 60px 30px;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 5px;
+  }
+  .col-label { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+  #services-editor { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
+  .svc-edit-row input, .add-row input { font-size: 11px; padding: 5px 7px; }
+
+  .author-note {
+    margin-top: 12px;
+    color: var(--muted);
+    font-size: 10px;
+    text-align: center;
+    opacity: .85;
+  }
+  .author-note a {
+    color: inherit;
+    text-decoration: none;
+  }
+  .author-note a:hover {
+    color: var(--text);
+  }
+
+  .info-box {
+    background: #4f8fff10; border: 1px solid #4f8fff30; border-radius: 6px;
+    padding: 9px 12px; font-size: 10px; color: #7fa8ff; line-height: 1.7;
+    margin-bottom: 14px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">DD<span>.</span>Monitor</div>
+  <div class="header-right">
+    <span id="last-check">—</span>
+    <button class="btn-icon" id="btn-refresh">↺ Checar</button>
+  </div>
+</header>
+
+<div class="tabs">
+  <div class="tab active" data-tab="status">Status</div>
+  <div class="tab" data-tab="config">Configurar</div>
+</div>
+
+<div class="panel active" id="panel-status">
+  <div id="status-list"><div class="empty">Carregando...</div></div>
+</div>
+
+<div class="panel" id="panel-config">
+  <div class="config-panel">
+    <div class="info-box">
+      Monitoramento em <strong>tempo real</strong> a partir dos dados exibidos pelo Downdetector.<br>
+      Avisa quando o número de reportes ultrapassa o <strong>limiar</strong> definido.
+    </div>
+    <div class="field-group">
+      <label>Intervalo de checagem (minutos)</label>
+      <input type="number" id="interval" min="1" max="60" value="10">
+    </div>
+    <div class="field-group">
+      <label>Origem dos dados</label>
+      <select id="source-site">
+        <option value="com.br">downdetector.com.br</option>
+        <option value="com">downdetector.com</option>
+      </select>
+    </div>
+
+    <div class="config-labels">
+      <span class="col-label">Nome</span>
+      <span class="col-label">Slug</span>
+      <span class="col-label">Limiar</span>
+      <span></span>
+    </div>
+    <div id="services-editor"></div>
+    <div class="add-row">
+      <input type="text" id="new-name" placeholder="Ex: TIM">
+      <input type="text" id="new-slug" placeholder="tim">
+      <input type="number" id="new-threshold" placeholder="100" value="100">
+      <button class="btn-small" id="btn-add">+ Add</button>
+    </div>
+    <button class="btn-primary btn-save-wide" id="btn-save">Salvar</button>
+    <div class="author-note">by <a href="https://github.com/DreamerJP" target="_blank" rel="noreferrer">DreamerJP</a></div>
+  </div>
+</div>
+
+<script src="constants.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>

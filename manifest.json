@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Downdetector Monitor",
+  "version": "1.0",
+  "description": "Monitora serviços no Downdetector e avisa quando há falhas.",
+
+  "permissions": ["alarms", "notifications", "storage", "scripting", "tabs", "declarativeNetRequest"],
+  "host_permissions": [
+    "https://*.downdetector.com.br/*",
+    "https://*.downdetector.com/*"
+  ],
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.downdetector.com.br/*",
+        "https://*.downdetector.com/*"
+      ],
+      "js": ["capture.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Downdetector Monitor",
+    "default_icon": {
+      "16":  "icons/icon16.png",
+      "48":  "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

@@ -1,0 +1,5 @@
+const DEFAULT_THRESHOLD = 100;
+const DEFAULT_SOURCE_SITE = "com.br";
+const WARNING_RATIO = 0.75;
+const MAX_POINTS = 96;
+const MIN_GRAPH_POINTS = 12;
