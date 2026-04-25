@@ -437,7 +437,7 @@ async function getOrCreateWorkerTab() {
 
   try {
     await chrome.tabs.update(createdTab.id, { muted: true });
-  } catch (_e) {}
+  } catch (_e) { }
 
   try {
     await chrome.declarativeNetRequest.updateSessionRules({
@@ -534,7 +534,7 @@ async function waitForPageSignals(tabId) {
     if (lastSignals?.cloudflareBlocked) {
       if (!hasReloaded) {
         hasReloaded = true;
-        chrome.tabs.reload(tabId).catch(() => {});
+        chrome.tabs.reload(tabId).catch(() => { });
         await delay(5000); // Aguarda 5 segundos para a página recarregar e o Cloudflare processar
         continue;
       }
@@ -543,7 +543,7 @@ async function waitForPageSignals(tabId) {
 
       if (!notifiedCloudflare && cloudflareBlockedCount > 5) {
         notifiedCloudflare = true;
-        
+
         try {
           const tab = await chrome.tabs.get(tabId);
           if (tab && tab.windowId) {
@@ -554,8 +554,8 @@ async function waitForPageSignals(tabId) {
             await chrome.windows.update(tab.windowId, { focused: true });
             await chrome.tabs.update(tabId, { active: true });
           }
-        } catch (_e) {}
-        
+        } catch (_e) { }
+
         chrome.notifications.create("dd-cf", {
           type: "basic",
           iconUrl: "icons/icon128.png",
@@ -565,14 +565,14 @@ async function waitForPageSignals(tabId) {
         });
       }
     } else if (lastSignals?.reportPayload || (Array.isArray(lastSignals?.svgHistory) && lastSignals.svgHistory.length >= 24)) {
-      
+
       if (notifiedCloudflare && previousActiveTabId) {
-         try {
-           const currentTab = await chrome.tabs.get(tabId);
-           if (currentTab.active) {
-             await chrome.tabs.update(previousActiveTabId, { active: true });
-           }
-         } catch (_e) {}
+        try {
+          const currentTab = await chrome.tabs.get(tabId);
+          if (currentTab.active) {
+            await chrome.tabs.update(previousActiveTabId, { active: true });
+          }
+        } catch (_e) { }
       }
 
       return lastSignals;
@@ -767,7 +767,7 @@ async function performCheckAllServices() {
       if (latestTab.url !== "about:blank") {
         await chrome.tabs.update(tab.id, { url: "about:blank" });
       }
-    } catch (_error) {}
+    } catch (_error) { }
   }
 
   await persistProgress(statusMap, alertedSet, {
@@ -811,7 +811,7 @@ function sendNotification(name, slug, current, threshold, eventType = "outage") 
     type: "basic",
     iconUrl: "icons/icon128.png",
     title: isRecovery ? `✅ Normalizado: ${name}` : `⚠️ Queda: ${name}`,
-    message: isRecovery 
+    message: isRecovery
       ? `Reclamações baixaram para ${current} (Abaixo do limiar de ${threshold}). O serviço parece estar estável novamente.`
       : `${current} reportes detectados (Acima do limiar de ${threshold}). Problema provável no serviço.`,
     priority: 2
