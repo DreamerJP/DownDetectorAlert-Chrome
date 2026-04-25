@@ -29,7 +29,6 @@ const LEGACY_DEFAULT_THRESHOLDS = {
 let activeCheckPromise = null;
 const TRANSIENT_SERVICE_ERROR_PATTERNS = [
   /timeout/i,
-  /cloudflare bloqueou/i,
   /o gr[aá]fico real n[aã]o apareceu/i,
   /n[aã]o consegui transformar o gr[aá]fico renderizado em s[ée]rie/i,
   /receiving end does not exist/i,
@@ -522,8 +521,10 @@ async function waitForPageSignals(tabId) {
   let lastSignals = null;
   let notifiedCloudflare = false;
   let hasReloaded = false;
+  let cloudflareBlockedCount = 0;
+  let previousActiveTabId = null;
 
-  for (let attempt = 0; attempt < 25; attempt += 1) {
+  for (let attempt = 0; attempt < 45; attempt += 1) {
     try {
       lastSignals = await readPageSignals(tabId);
     } catch (_error) {
@@ -538,24 +539,42 @@ async function waitForPageSignals(tabId) {
         continue;
       }
 
-      if (!notifiedCloudflare) {
+      cloudflareBlockedCount += 1;
+
+      if (!notifiedCloudflare && cloudflareBlockedCount > 5) {
         notifiedCloudflare = true;
-        chrome.tabs.get(tabId).then(tab => {
+        
+        try {
+          const tab = await chrome.tabs.get(tabId);
           if (tab && tab.windowId) {
-            chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+            const activeTabs = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+            if (activeTabs.length > 0 && activeTabs[0].id !== tabId) {
+              previousActiveTabId = activeTabs[0].id;
+            }
+            await chrome.windows.update(tab.windowId, { focused: true });
+            await chrome.tabs.update(tabId, { active: true });
           }
-          chrome.tabs.update(tabId, { active: true }).catch(() => {});
-        }).catch(() => {});
+        } catch (_e) {}
         
         chrome.notifications.create("dd-cf", {
           type: "basic",
           iconUrl: "icons/icon128.png",
           title: "Ação Necessária",
-          message: "O Downdetector pediu verificação de segurança. Por favor, clique na caixa 'Sou humano' na aba que foi aberta.",
+          message: "O Downdetector pediu verificação de segurança. Por favor, resolva o captcha na aba aberta.",
           priority: 2
         });
       }
     } else if (lastSignals?.reportPayload || (Array.isArray(lastSignals?.svgHistory) && lastSignals.svgHistory.length >= 24)) {
+      
+      if (notifiedCloudflare && previousActiveTabId) {
+         try {
+           const currentTab = await chrome.tabs.get(tabId);
+           if (currentTab.active) {
+             await chrome.tabs.update(previousActiveTabId, { active: true });
+           }
+         } catch (_e) {}
+      }
+
       return lastSignals;
     }
 
@@ -712,11 +731,14 @@ async function performCheckAllServices() {
 
         if (isOutage) {
           if (!alertedSet.has(service.slug)) {
-            sendNotification(service.name, service.slug, result.current, threshold);
+            sendNotification(service.name, service.slug, result.current, threshold, "outage");
             alertedSet.add(service.slug);
           }
         } else {
-          alertedSet.delete(service.slug);
+          if (alertedSet.has(service.slug)) {
+            sendNotification(service.name, service.slug, result.current, threshold, "recovery");
+            alertedSet.delete(service.slug);
+          }
         }
       } catch (error) {
         console.error(`Erro ao checar ${service.slug}:`, error);
@@ -742,7 +764,7 @@ async function performCheckAllServices() {
   } finally {
     try {
       const latestTab = await chrome.tabs.get(tab.id);
-      if (!latestTab.active && latestTab.url !== "about:blank") {
+      if (latestTab.url !== "about:blank") {
         await chrome.tabs.update(tab.id, { url: "about:blank" });
       }
     } catch (_error) {}
@@ -773,14 +795,25 @@ async function persistProgress(statusMap, alertedSet, extra = {}) {
     statusMap: { ...statusMap },
     ...extra
   });
+
+  const count = alertedSet.size;
+  if (count > 0) {
+    chrome.action.setBadgeText({ text: String(count) });
+    chrome.action.setBadgeBackgroundColor({ color: "#000000" }); // Preto contrasta bem com o vermelho
+  } else {
+    chrome.action.setBadgeText({ text: "" });
+  }
 }
 
-function sendNotification(name, slug, current, threshold) {
-  chrome.notifications.create(`dd-${slug}-${Date.now()}`, {
+function sendNotification(name, slug, current, threshold, eventType = "outage") {
+  const isRecovery = eventType === "recovery";
+  chrome.notifications.create(`dd-${slug}-${eventType}-${Date.now()}`, {
     type: "basic",
     iconUrl: "icons/icon128.png",
-    title: `Alerta: ${name}`,
-    message: `${current} reportes detectados (Limiar: ${threshold}). Problema provável no serviço.`,
+    title: isRecovery ? `✅ Normalizado: ${name}` : `⚠️ Queda: ${name}`,
+    message: isRecovery 
+      ? `Reclamações baixaram para ${current} (Abaixo do limiar de ${threshold}). O serviço parece estar estável novamente.`
+      : `${current} reportes detectados (Acima do limiar de ${threshold}). Problema provável no serviço.`,
     priority: 2
   });
 }
