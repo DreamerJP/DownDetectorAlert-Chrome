@@ -413,6 +413,7 @@ chrome.tabs.onRemoved.addListener(async tabId => {
 });
 
 async function getOrCreateWorkerTab() {
+  const workerUrl = chrome.runtime.getURL("worker.html");
   const { workerTabId } = await chrome.storage.local.get(WORKER_TAB_ID_KEY);
 
   if (Number.isInteger(workerTabId)) {
@@ -429,8 +430,22 @@ async function getOrCreateWorkerTab() {
     }
   }
 
+  // Tenta encontrar uma aba existente que seja o nosso worker (útil após reiniciar o navegador)
+  const tabs = await chrome.tabs.query({ url: workerUrl });
+  if (tabs.length > 0) {
+    const foundTab = tabs[0];
+    await chrome.storage.local.set({ [WORKER_TAB_ID_KEY]: foundTab.id });
+    
+    // Garante que está pinada e mutada
+    try {
+      await chrome.tabs.update(foundTab.id, { pinned: true, muted: true });
+    } catch (_e) { }
+
+    return foundTab;
+  }
+
   const createdTab = await chrome.tabs.create({
-    url: "about:blank",
+    url: workerUrl,
     active: false,
     pinned: true
   });
@@ -763,9 +778,10 @@ async function performCheckAllServices() {
     }
   } finally {
     try {
+      const workerUrl = chrome.runtime.getURL("worker.html");
       const latestTab = await chrome.tabs.get(tab.id);
-      if (latestTab.url !== "about:blank") {
-        await chrome.tabs.update(tab.id, { url: "about:blank" });
+      if (latestTab.url !== workerUrl) {
+        await chrome.tabs.update(tab.id, { url: workerUrl });
       }
     } catch (_error) { }
   }
