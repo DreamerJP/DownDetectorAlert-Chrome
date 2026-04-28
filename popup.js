@@ -13,10 +13,13 @@ function escapeAttr(text) {
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 document.querySelectorAll(".tab").forEach(tab => {
   tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab,.panel").forEach(el => el.classList.remove("active"));
+    const target = tab.dataset.tab;
+    document.querySelectorAll(".tab, .panel").forEach(el => el.classList.remove("active"));
     tab.classList.add("active");
-    document.getElementById(`panel-${tab.dataset.tab}`).classList.add("active");
-    if (tab.dataset.tab === "config") loadConfig();
+    document.getElementById(`panel-${target}`).classList.add("active");
+    
+    if (target === "config") loadConfig();
+    if (target === "logs") renderLogs();
   });
 });
 
@@ -250,8 +253,23 @@ function renderStatus(statusMap, lastCheck) {
     return;
   }
 
+  // Ordenação inteligente: Problemas > Recuperados > Normal
+  const sortedEntries = Object.entries(statusMap).sort(([, a], [, b]) => {
+    const getWeight = (info) => {
+      if (info.error || info.outage || (info.current >= info.threshold * WARNING_RATIO)) return 3;
+      if (info.isTrending && !info.outage) return 2;
+      return 1;
+    };
+    
+    const weightA = getWeight(a);
+    const weightB = getWeight(b);
+    
+    if (weightA !== weightB) return weightB - weightA;
+    return a.name.localeCompare(b.name); // Desempate por nome
+  });
+
   let html = "";
-  for (const [slug, info] of Object.entries(statusMap)) {
+  for (const [slug, info] of sortedEntries) {
     let dotCls, badgeCls, badgeText, detail;
 
     if (info.error) {
@@ -293,7 +311,10 @@ function renderStatus(statusMap, lastCheck) {
             <div class="svc-name">${escapeHtml(info.name)}</div>
             <div class="svc-detail">${escapeHtml(detail)}</div>
           </div>
-          <div class="svc-badge ${badgeCls}">${escapeHtml(badgeText)}</div>
+          <div class="badge-row">
+            ${info.isTrending ? `<div class="svc-badge badge-trending ${info.outage ? '' : 'badge-recovered'}" title="${info.outage ? 'Serviço identificado automaticamente pelo Downdetector' : 'Serviço normalizado, sairá da lista em breve'}">${info.outage ? 'Trending' : 'Recuperado'}</div>` : ''}
+            <div class="svc-badge ${badgeCls}">${escapeHtml(badgeText)}</div>
+          </div>
         </div>
         <div class="svc-body">
           ${historyHtml}
@@ -320,21 +341,67 @@ function pad(n) { return String(n).padStart(2, "0"); }
 async function refreshStatus() {
   const data = await chrome.runtime.sendMessage({ type: "GET_STATUS" });
   renderStatus(data.statusMap, data.lastCheck);
+  if (document.getElementById("panel-logs").classList.contains("active")) {
+    renderLogs();
+  }
+}
+
+async function renderLogs() {
+  try {
+    const { logs = [] } = await chrome.storage.local.get("logs");
+    const container = document.getElementById("log-container");
+    if (!container) return;
+
+    if (!Array.isArray(logs) || logs.length === 0) {
+      container.innerHTML = '<div class="empty">Nenhum log registrado ainda.</div>';
+      return;
+    }
+
+    container.innerHTML = logs.map(l => {
+      const d = new Date(l.ts);
+      const ts = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      return `<div class="log-entry"><span class="log-ts">[${ts}]</span><span class="log-msg log-type-${l.type}">${escapeHtml(l.msg)}</span></div>`;
+    }).join("");
+    
+    container.scrollTop = container.scrollHeight;
+  } catch (e) { console.warn("Render logs failed", e); }
 }
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
 
   // Show check progress in the header
-  if (changes.isChecking || changes.checkCompleted || changes.checkTotal) {
-    chrome.storage.local.get(["isChecking", "checkCompleted", "checkTotal"]).then(data => {
+  if (changes.isChecking || changes.checkCompleted || changes.checkTotal || changes.statusText) {
+    chrome.storage.local.get(["isChecking", "checkCompleted", "checkTotal", "statusText"]).then(data => {
       const el = document.getElementById("last-check");
-      if (data.isChecking && Number.isFinite(data.checkCompleted) && Number.isFinite(data.checkTotal) && data.checkCompleted < data.checkTotal) {
-        el.textContent = `Verificando ${data.checkCompleted + 1}/${data.checkTotal}...`;
+      const btn = document.getElementById("btn-refresh");
+      const header = document.querySelector("header");
+      
+      if (data.isChecking) {
+        btn.style.display = "none";
+        if (!document.getElementById("active-spinner")) {
+          const spinner = document.createElement("div");
+          spinner.id = "active-spinner";
+          spinner.className = "spinner";
+          header.querySelector(".header-right").appendChild(spinner);
+        }
+        
+        if (data.statusText) {
+          el.textContent = data.statusText;
+        } else if (Number.isFinite(data.checkCompleted) && Number.isFinite(data.checkTotal) && data.checkCompleted < data.checkTotal) {
+          el.textContent = `Verificando ${data.checkCompleted + 1}/${data.checkTotal}...`;
+        }
+      } else {
+        btn.style.display = "block";
+        btn.disabled = false;
+        btn.textContent = "↺ Checar";
+        const spinner = document.getElementById("active-spinner");
+        if (spinner) spinner.remove();
       }
     });
   }
 
+  if (changes.logs) renderLogs();
   if (!changes.statusMap && !changes.lastCheck) return;
 
   const nextStatusMap = changes.statusMap ? changes.statusMap.newValue : latestStatusMap;
@@ -367,6 +434,12 @@ async function loadConfig() {
   document.getElementById("interval").value = config.interval_minutes;
   currentSourceSite = config.source_site || DEFAULT_SOURCE_SITE;
   document.getElementById("source-site").value = currentSourceSite;
+  
+  const topEnabled = config.top_services_enabled === true;
+  document.getElementById("top-enabled").checked = topEnabled;
+  document.getElementById("top-count").value = config.top_services_count || 5;
+  document.getElementById("top-count-group").style.display = topEnabled ? "block" : "none";
+
   currentServices = (config.services || []).map(service => ({
     ...service,
     threshold: parseInt(service.threshold) || DEFAULT_THRESHOLD
@@ -416,6 +489,8 @@ document.getElementById("btn-save").addEventListener("click", async () => {
   const config = {
     interval_minutes: parseInt(document.getElementById("interval").value) || 10,
     source_site: document.getElementById("source-site").value || DEFAULT_SOURCE_SITE,
+    top_services_enabled: document.getElementById("top-enabled").checked,
+    top_services_count: parseInt(document.getElementById("top-count").value) || 5,
     services: currentServices.filter(s => s.slug)
   };
   await chrome.runtime.sendMessage({ type: "SAVE_CONFIG", config });
@@ -423,8 +498,44 @@ document.getElementById("btn-save").addEventListener("click", async () => {
   setTimeout(() => btn.textContent = "Salvar", 1500);
 });
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
-refreshStatus().catch(() => {
-  document.getElementById("status-list").innerHTML =
-    '<div class="empty">Falha ao carregar os dados.<br>Clique em ↺ Checar para tentar novamente.</div>';
+document.getElementById("top-enabled").addEventListener("change", e => {
+  document.getElementById("top-count-group").style.display = e.target.checked ? "block" : "none";
 });
+
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+async function boot() {
+  const data = await chrome.storage.local.get(["isChecking", "statusText", "checkCompleted", "checkTotal"]);
+  const btn = document.getElementById("btn-refresh");
+  const el = document.getElementById("last-check");
+  const header = document.querySelector("header");
+  
+  if (data.isChecking) {
+    btn.style.display = "none";
+    if (!document.getElementById("active-spinner")) {
+      const spinner = document.createElement("div");
+      spinner.id = "active-spinner";
+      spinner.className = "spinner";
+      header.querySelector(".header-right").appendChild(spinner);
+    }
+    
+    if (data.statusText) {
+      el.textContent = data.statusText;
+    } else if (Number.isFinite(data.checkCompleted) && Number.isFinite(data.checkTotal)) {
+      el.textContent = `Verificando ${data.checkCompleted + 1}/${data.checkTotal}...`;
+    }
+  } else {
+    btn.style.display = "block";
+    const spinner = document.getElementById("active-spinner");
+    if (spinner) spinner.remove();
+  }
+
+  refreshStatus().catch(() => {
+    document.getElementById("status-list").innerHTML =
+      '<div class="empty">Falha ao carregar os dados.<br>Clique em ↺ Checar para tentar novamente.</div>';
+  });
+  loadConfig();
+  renderLogs();
+}
+
+boot();

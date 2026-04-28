@@ -5,6 +5,8 @@ const WORKER_TAB_ID_KEY = "workerTabId";
 const DEFAULT_CONFIG = {
   interval_minutes: 10,
   source_site: DEFAULT_SOURCE_SITE,
+  top_services_enabled: DEFAULT_TOP_SERVICES_ENABLED,
+  top_services_count: DEFAULT_TOP_SERVICES_COUNT,
   services: [
     { slug: "youtube", name: "YouTube", threshold: DEFAULT_THRESHOLD },
     { slug: "netflix", name: "Netflix", threshold: DEFAULT_THRESHOLD },
@@ -47,6 +49,15 @@ function sanitizeSourceSite(value) {
   return value === "com" ? "com" : DEFAULT_SOURCE_SITE;
 }
 
+async function addLog(msg, type = "info") {
+  try {
+    const { logs = [] } = await chrome.storage.local.get("logs");
+    const newLog = { ts: Date.now(), msg, type };
+    const updatedLogs = [newLog, ...(Array.isArray(logs) ? logs : [])].slice(0, 100);
+    await chrome.storage.local.set({ logs: updatedLogs });
+  } catch (e) { console.error("Log failed", e); }
+}
+
 function upgradeLegacyConfig(config) {
   if (!config || !Array.isArray(config.services)) return config;
   if (config.services.length !== Object.keys(LEGACY_DEFAULT_THRESHOLDS).length) return config;
@@ -79,6 +90,8 @@ function normalizeConfig(config) {
   return {
     interval_minutes: Math.max(1, Math.min(60, parseInt(upgraded.interval_minutes, 10) || DEFAULT_CONFIG.interval_minutes)),
     source_site: sanitizeSourceSite(upgraded.source_site),
+    top_services_enabled: upgraded.top_services_enabled === true,
+    top_services_count: Math.max(1, Math.min(20, parseInt(upgraded.top_services_count, 10) || DEFAULT_TOP_SERVICES_COUNT)),
     services: inputServices
       .filter(service => service && service.slug)
       .map(service => ({
@@ -571,7 +584,7 @@ async function waitForPageSignals(tabId) {
           }
         } catch (_e) { }
 
-        chrome.notifications.create("dd-cf", {
+        chrome.notifications.create(`dd-cf-${Date.now()}`, {
           type: "basic",
           iconUrl: "icons/icon128.png",
           title: "Ação Necessária",
@@ -701,32 +714,117 @@ async function scrapeServiceWithRetry(tabId, slug, sourceSite) {
 }
 
 async function performCheckAllServices() {
+  const startTime = Date.now();
+  await chrome.storage.local.set({ logs: [] }); // Limpa logs anteriores para o novo ciclo
+  await addLog("Iniciando verificação de todos os serviços...", "info");
+
   const config = await ensureConfig();
   const { alerted = [], statusMap: previousStatusMap = {} } = await chrome.storage.local.get(["alerted", "statusMap"]);
   const alertedSet = new Set(alerted);
   const statusMap = { ...previousStatusMap };
-  const totalServices = config.services.length;
+
+  const tab = await getOrCreateWorkerTab();
+  const servicesToCheck = [...config.services];
+
+  // Busca serviços em destaque (Trending) se habilitado
+  if (config.top_services_enabled) {
+    await addLog("Buscando serviços em destaque na home page...", "info");
+    
+    await persistProgress(statusMap, alertedSet, {
+      isChecking: true,
+      checkCompleted: 0,
+      checkTotal: servicesToCheck.length,
+      statusText: "Buscando tendências..."
+    });
+
+    try {
+      const homeUrl = config.source_site === "com" ? "https://downdetector.com/" : "https://downdetector.com.br/";
+      await updateTabAndWait(tab.id, homeUrl);
+      const homeSignals = await readPageSignals(tab.id);
+
+      if (homeSignals && Array.isArray(homeSignals.trendingServices)) {
+        const topCount = config.top_services_count || DEFAULT_TOP_SERVICES_COUNT;
+        const trending = homeSignals.trendingServices
+          .filter(s => s.hasProblem)
+          .slice(0, topCount);
+
+        if (trending.length > 0) {
+          await addLog(`Encontrados ${trending.length} serviços trending: ${trending.map(s => s.name).join(", ")}`, "success");
+        } else {
+          await addLog("Nenhum serviço em destaque com problemas no momento.", "info");
+        }
+
+        for (const s of trending) {
+          if (!servicesToCheck.find(existing => existing.slug === s.slug)) {
+            servicesToCheck.push({
+              ...s,
+              threshold: DEFAULT_THRESHOLD,
+              isTrending: true
+            });
+          }
+        }
+      }
+    } catch (error) {
+      await addLog(`Erro ao buscar tendências: ${error.message}`, "error");
+      console.error("Erro ao buscar serviços em destaque:", error);
+    }
+  }
 
   await persistProgress(statusMap, alertedSet, {
     isChecking: true,
     checkCompleted: 0,
-    checkTotal: totalServices
+    checkTotal: servicesToCheck.length,
+    statusText: "" // Limpa o texto customizado para mostrar a contagem normal
   });
 
-  const tab = await getOrCreateWorkerTab();
-
-  // Remove stale services no longer in config
-  const activeSlugs = new Set(config.services.map(s => s.slug));
+  // Limpeza inteligente de serviços antigos (Stale)
+  const now = Date.now();
+  const GRACE_PERIOD_MS = 30 * 60 * 1000; // 30 minutos de retenção após normalizar
+  
   for (const key of Object.keys(statusMap)) {
-    if (!activeSlugs.has(key)) delete statusMap[key];
+    const info = statusMap[key];
+    const isManual = config.services.some(s => s.slug === key);
+    
+    if (isManual) continue; // Nunca remove manuais
+    
+    const isCurrentlyTrending = servicesToCheck.some(s => s.slug === key && s.isTrending);
+    
+    if (isCurrentlyTrending) {
+      // Atualiza o timestamp de última vez visto como trending
+      info.lastSeenTrending = now;
+      continue;
+    }
+
+    // Se era trending mas sumiu da home:
+    // 1. Se ainda está em falha/alerta, mantém (precisamos monitorar até normalizar)
+    if (info.outage || (info.current >= info.threshold * WARNING_RATIO)) {
+      if (!servicesToCheck.some(s => s.slug === key)) {
+         servicesToCheck.push({ slug: key, name: info.name, threshold: info.threshold, isTrending: true });
+      }
+      continue;
+    }
+
+    // 2. Se já normalizou, verifica se passou o período de carência
+    const lastSeen = info.lastSeenTrending || info.ts || 0;
+    if (now - lastSeen > GRACE_PERIOD_MS) {
+      delete statusMap[key];
+    } else {
+      // Mantém na lista de checagem para garantir que o status 'Normal' seja atualizado no popup
+      if (!servicesToCheck.some(s => s.slug === key)) {
+        servicesToCheck.push({ slug: key, name: info.name, threshold: info.threshold, isTrending: true });
+      }
+    }
   }
 
+  const totalServices = servicesToCheck.length;
+
   try {
-    for (let index = 0; index < config.services.length; index += 1) {
-      const service = config.services[index];
+    for (let index = 0; index < servicesToCheck.length; index += 1) {
+      const service = servicesToCheck[index];
       const threshold = sanitizeThreshold(service.threshold);
 
       try {
+        await addLog(`Checando: ${service.name} (${service.slug})...`);
         const result = await scrapeServiceWithRetry(tab.id, service.slug, config.source_site);
         const isOutage = result.current >= threshold;
 
@@ -741,8 +839,11 @@ async function performCheckAllServices() {
           sourceSite: config.source_site,
           threshold,
           outage: isOutage,
+          isTrending: service.isTrending === true,
           ts: Date.now()
         };
+        
+        await addLog(`Checado: ${service.name} (${result.current}/${threshold})`, isOutage ? "error" : "success");
 
         if (isOutage) {
           if (!alertedSet.has(service.slug)) {
@@ -756,6 +857,7 @@ async function performCheckAllServices() {
           }
         }
       } catch (error) {
+        await addLog(`Erro ao checar ${service.slug}: ${error.message}`, "error");
         console.error(`Erro ao checar ${service.slug}:`, error);
         statusMap[service.slug] = {
           name: service.name,
@@ -785,6 +887,9 @@ async function performCheckAllServices() {
       }
     } catch (_error) { }
   }
+
+  const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+  await addLog(`Verificação concluída em ${duration}s.`, "info");
 
   await persistProgress(statusMap, alertedSet, {
     isChecking: false,

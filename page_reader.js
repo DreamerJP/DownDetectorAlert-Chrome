@@ -317,7 +317,43 @@
       if (!reportUrl && capturedUrl) reportUrl = capturedUrl;
       const svgChart = extractSvgChart(peak);
 
+      const extractTrendingServices = () => {
+        const services = [];
+        // Seleciona os cards de serviços que geralmente estão no grid da home
+        const items = document.querySelectorAll("a[href*='/status/'], a[href*='/fora-do-ar/']");
+
+        for (const item of items) {
+          const href = item.getAttribute("href");
+          const slugMatch = href.match(/\/(?:status|fora-do-ar)\/([^/]+)\/?$/);
+          if (!slugMatch) continue;
+
+          const slug = slugMatch[1];
+          if (slug === "fora-do-ar" || slug === "status") continue;
+          if (services.find(s => s.slug === slug)) continue;
+
+          // Tenta pegar o nome da empresa
+          const nameElement = item.querySelector(".company-name, .name, h3, h4, strong") || item;
+          let name = nameElement.textContent.trim().split("\n")[0].trim();
+          if (name.length > 30) name = name.substring(0, 27) + "...";
+
+          // Busca por indicadores de problemas em qualquer lugar dentro do card
+          const childrenLabels = Array.from(item.querySelectorAll("[aria-label]")).map(el => el.getAttribute("aria-label")).join(" ");
+          const cardText = item.innerText + " " + childrenLabels;
+          
+          const hasProblem = /problema|problem|outage|falha|estabilidade|estável|instabilidade|baixar|down/i.test(cardText) ||
+                             item.querySelector(".indicator-problem, .indicator-outage, .problem, .danger, .status-red, .status-yellow") !== null;
+
+          services.push({ name, slug, hasProblem });
+          if (services.length >= 20) break; // Limite de busca
+        }
+        return services;
+      };
+
+      const isHomePage = window.location.pathname === "/" || window.location.pathname === "/index.html";
+
       return {
+        isHomePage,
+        trendingServices: isHomePage ? extractTrendingServices() : [],
         cloudflareBlocked,
         reportUrl,
         reportPayload: capture?.payload ?? null,

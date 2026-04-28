@@ -27,13 +27,30 @@
   body { width: 360px; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 12px; }
 
   header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 13px 16px 11px; border-bottom: 1px solid var(--border); background: var(--surface);
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
   }
-  .logo { font-family: var(--head); font-size: 15px; font-weight: 800; color: #fff; letter-spacing: -.3px; }
+  .logo { 
+    font-family: var(--head); font-size: 15px; font-weight: 800; color: #fff; letter-spacing: -.3px; 
+    flex-shrink: 0; min-width: 100px;
+  }
   .logo span { color: var(--accent); }
-  .header-right { display: flex; gap: 8px; align-items: center; }
-  #last-check { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .header-right { display: flex; gap: 10px; align-items: center; flex: 1; justify-content: flex-end; min-width: 0; }
+  #last-check { 
+    color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; 
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid var(--accent);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360s); } }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
   button { cursor: pointer; border: none; font-family: var(--mono); font-size: 11px; border-radius: 4px; padding: 5px 10px; transition: all .15s; }
   button:hover { opacity: .8; }
@@ -60,6 +77,7 @@
   .tab { flex: 1; padding: 8px; text-align: center; cursor: pointer; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; border-bottom: 2px solid transparent; transition: color .15s, border-color .15s; }
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab[data-tab="logs"] { flex: 0.7; }
 
   .panel { display: none; }
   .panel.active { display: block; }
@@ -137,14 +155,35 @@
   .badge-warning { background: #ffca2818; color: var(--yellow); border: 1px solid #ffca2840; }
   .badge-outage  { background: #ff4d4d18; color: var(--red);   border: 1px solid #ff4d4d40; }
   .badge-unknown { background: var(--muted-bg); color: var(--text); border: 1px solid var(--border); }
+  .badge-trending { background: #4f8fff20; color: var(--accent); border: 1px solid #4f8fff50; margin-left: 6px; }
+  .badge-recovered { opacity: 0.6; filter: grayscale(0.5); font-style: italic; }
+  .badge-row { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
   .svc-detail { font-size: 11px; color: var(--muted); margin-top: 3px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .empty { padding: 28px 16px; text-align: center; color: var(--muted); font-size: 11px; line-height: 2; }
 
   /* ── Config panel ── */
-  .config-panel { padding: 12px 16px; }
-  .field-group { margin-bottom: 12px; }
+  .config-panel { padding: 0; }
+
+  .config-section {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .config-section:last-child { border-bottom: none; }
+
+  .section-label {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 9px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .8px; color: var(--accent); margin-bottom: 12px;
+  }
+  .section-label::after {
+    content: ''; flex: 1; height: 1px; background: #4f8fff22;
+  }
+
+  .field-group { margin-bottom: 10px; }
+  .field-group:last-child { margin-bottom: 0; }
+
   label { display: block; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 5px; }
   input[type=number], input[type=text], select {
     width: 100%; background: var(--surface); border: 1px solid var(--border);
@@ -153,47 +192,88 @@
   }
   input:focus, select:focus { border-color: var(--accent); }
 
-  .section-head {
-    display:flex; align-items:center; justify-content:space-between; gap:8px;
-    margin: 14px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
-  }
-  .section-title {
-    font-family: var(--head); font-size: 11px; font-weight: 700; color: var(--muted);
-    text-transform: uppercase; letter-spacing: 1px;
-  }
-  .section-meta { color: var(--muted); font-size: 10px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
-  .svc-edit-row, .add-row, .config-labels {
-    display: grid;
-    grid-template-columns: 1fr 1fr 60px 30px;
-    gap: 6px;
-    align-items: center;
-    margin-bottom: 5px;
+  /* Trending toggle row */
+  .toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px;
   }
-  .col-label { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
-  #services-editor { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
-  .svc-edit-row input, .add-row input { font-size: 11px; padding: 5px 7px; }
+  .toggle-left { display: flex; align-items: center; gap: 9px; }
+  .toggle-left label { margin-bottom: 0; font-size: 11px; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--text); }
+  .toggle-left input[type=checkbox] { width: auto; }
+  .toggle-right { display: flex; align-items: center; gap: 7px; }
+  .toggle-right label { margin-bottom: 0; font-size: 10px; white-space: nowrap; }
+  .toggle-right input[type=number] { width: 48px; padding: 4px 6px; text-align: center; }
+
+  /* Services list */
+  .config-labels {
+    display: grid; grid-template-columns: 1fr 1fr 56px 30px;
+    gap: 6px; align-items: center; margin-bottom: 6px;
+    padding: 0 2px;
+  }
+  .col-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+
+  #services-editor { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+  .svc-edit-row {
+    display: grid; grid-template-columns: 1fr 1fr 56px 30px;
+    gap: 6px; align-items: center;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 5px; padding: 5px 6px;
+    transition: border-color .15s;
+  }
+  .svc-edit-row:hover { border-color: #2e364f; }
+  .svc-edit-row input {
+    border: none; background: transparent; padding: 3px 4px;
+    font-size: 11px; color: var(--text);
+    border-radius: 3px;
+  }
+  .svc-edit-row input:focus { background: #ffffff08; outline: 1px solid var(--accent); }
+
+  .add-row {
+    display: grid; grid-template-columns: 1fr 1fr 56px 30px;
+    gap: 6px; align-items: center;
+    background: #4f8fff08; border: 1px dashed #4f8fff30;
+    border-radius: 5px; padding: 5px 6px;
+    transition: border-color .15s;
+  }
+  .add-row:focus-within { border-color: #4f8fff60; background: #4f8fff0e; }
+  .add-row input { font-size: 11px; padding: 4px 5px; }
 
   .author-note {
-    margin-top: 12px;
-    color: var(--muted);
-    font-size: 10px;
-    text-align: center;
-    opacity: .85;
+    padding: 10px 16px;
+    color: var(--muted); font-size: 10px; text-align: center; opacity: .85;
   }
-  .author-note a {
-    color: inherit;
-    text-decoration: none;
-  }
-  .author-note a:hover {
-    color: var(--text);
-  }
+  .author-note a { color: inherit; text-decoration: none; }
+  .author-note a:hover { color: var(--text); }
 
   .info-box {
     background: #4f8fff10; border: 1px solid #4f8fff30; border-radius: 6px;
     padding: 9px 12px; font-size: 10px; color: #7fa8ff; line-height: 1.7;
-    margin-bottom: 14px;
   }
+
+  /* ── Logs panel ── */
+  #log-container {
+    padding: 8px 12px;
+    height: 380px;
+    overflow-y: auto;
+    font-family: var(--mono);
+    font-size: 10px;
+    line-height: 1.5;
+  }
+  .log-entry {
+    margin-bottom: 2px;
+    padding-bottom: 2px;
+    border-bottom: 1px solid #ffffff05;
+    white-space: normal;
+    word-break: break-all;
+  }
+  .log-ts { color: var(--muted); margin-right: 6px; }
+  .log-type-error { color: var(--red); }
+  .log-type-warn { color: var(--yellow); }
+  .log-type-info { color: var(--accent); }
+  .btn-clear-logs { margin: 10px 16px; width: calc(100% - 32px); }
 </style>
 </head>
 <body>
@@ -209,6 +289,7 @@
 <div class="tabs">
   <div class="tab active" data-tab="status">Status</div>
   <div class="tab" data-tab="config">Configurar</div>
+  <div class="tab" data-tab="logs">Logs</div>
 </div>
 
 <div class="panel active" id="panel-status">
@@ -217,38 +298,77 @@
 
 <div class="panel" id="panel-config">
   <div class="config-panel">
-    <div class="info-box">
-      Monitoramento em <strong>tempo real</strong> a partir dos dados exibidos pelo Downdetector.<br>
-      Avisa quando o número de reportes ultrapassa o <strong>limiar</strong> definido.
-    </div>
-    <div class="field-group">
-      <label>Intervalo de checagem (minutos)</label>
-      <input type="number" id="interval" min="1" max="60" value="10">
-    </div>
-    <div class="field-group">
-      <label>Origem dos dados</label>
-      <select id="source-site">
-        <option value="com.br">downdetector.com.br</option>
-        <option value="com">downdetector.com</option>
-      </select>
+
+    <!-- Seção 1: Sobre -->
+    <div class="config-section">
+      <div class="info-box">
+        Monitoramento em <strong>tempo real</strong> a partir dos dados exibidos pelo Downdetector.<br>
+        Avisa quando o número de reportes ultrapassa o <strong>limiar</strong> definido.
+      </div>
     </div>
 
-    <div class="config-labels">
-      <span class="col-label">Nome</span>
-      <span class="col-label">Slug</span>
-      <span class="col-label">Limiar</span>
-      <span></span>
+    <!-- Seção 2: Geral -->
+    <div class="config-section">
+      <div class="section-label">Geral</div>
+      <div class="two-col">
+        <div class="field-group">
+          <label>Intervalo (min)</label>
+          <input type="number" id="interval" min="1" max="60" value="10">
+        </div>
+        <div class="field-group">
+          <label>Origem dos dados</label>
+          <select id="source-site">
+            <option value="com.br">.com.br</option>
+            <option value="com">.com</option>
+          </select>
+        </div>
+      </div>
     </div>
-    <div id="services-editor"></div>
-    <div class="add-row">
-      <input type="text" id="new-name" placeholder="Ex: TIM">
-      <input type="text" id="new-slug" placeholder="tim">
-      <input type="number" id="new-threshold" placeholder="100" value="100">
-      <button class="btn-small" id="btn-add">+ Add</button>
+
+    <!-- Seção 3: Trending -->
+    <div class="config-section">
+      <div class="section-label">Trending</div>
+      <div class="toggle-row">
+        <div class="toggle-left">
+          <input type="checkbox" id="top-enabled" style="width: auto;">
+          <label for="top-enabled">Monitorar TOP com problemas</label>
+        </div>
+        <div id="top-count-group" class="toggle-right">
+          <label for="top-count">Máx:</label>
+          <input type="number" id="top-count" min="1" max="20" value="5">
+        </div>
+      </div>
     </div>
-    <button class="btn-primary btn-save-wide" id="btn-save">Salvar</button>
-    <div class="author-note">by <a href="https://github.com/DreamerJP" target="_blank" rel="noreferrer">DreamerJP</a></div>
+
+    <!-- Seção 4: Serviços -->
+    <div class="config-section">
+      <div class="section-label">Serviços monitorados</div>
+      <div class="config-labels">
+        <span class="col-label">Nome</span>
+        <span class="col-label">Slug</span>
+        <span class="col-label">Limiar</span>
+        <span></span>
+      </div>
+      <div id="services-editor"></div>
+      <div class="add-row">
+        <input type="text" id="new-name" placeholder="Ex: TIM">
+        <input type="text" id="new-slug" placeholder="tim">
+        <input type="number" id="new-threshold" placeholder="100" value="100">
+        <button class="btn-small" id="btn-add">+ Add</button>
+      </div>
+    </div>
+
+    <!-- Salvar + autor -->
+    <div class="config-section">
+      <button class="btn-primary btn-save-wide" id="btn-save" style="width:100%; padding: 9px 12px; border-radius: 6px;">Salvar configurações</button>
+      <div class="author-note">by <a href="https://github.com/DreamerJP" target="_blank" rel="noreferrer">DreamerJP</a></div>
+    </div>
+
   </div>
+</div>
+
+<div class="panel" id="panel-logs">
+  <div id="log-container"></div>
 </div>
 
 <script src="constants.js"></script>
