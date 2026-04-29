@@ -401,7 +401,11 @@ async function scheduleAlarm() {
 
 async function initializeExtension() {
   await ensureConfig();
-  await scheduleAlarm();
+  // Só agenda o alarme se já houver alguma janela aberta para este perfil
+  const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+  if (windows.length > 0) {
+    await scheduleAlarm();
+  }
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -412,9 +416,25 @@ chrome.runtime.onStartup.addListener(() => {
   initializeExtension().catch(error => console.error("Falha ao iniciar:", error));
 });
 
+// Quando uma janela é aberta, garante que o monitoramento está ativo
+chrome.windows.onCreated.addListener(async (window) => {
+  if (window.type === 'normal') {
+    await scheduleAlarm();
+  }
+});
+
+// Quando a última janela é fechada, removemos todos os alarmes para poupar recursos do sistema
+chrome.windows.onRemoved.addListener(async () => {
+  const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+  if (windows.length === 0) {
+    await chrome.alarms.clearAll();
+    console.log("Última janela fechada. Monitoramento suspenso para economizar recursos.");
+  }
+});
+
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === "check") {
-    checkAllServices().catch(error => console.error("Falha na checagem:", error));
+    checkAllServices(true).catch(error => console.error("Falha na checagem:", error));
   }
 });
 
@@ -805,8 +825,8 @@ async function performCheckAllServices() {
     }
 
     // 2. Se já normalizou, verifica se passou o período de carência
-    const lastSeen = info.lastSeenTrending || info.ts || 0;
-    if (now - lastSeen > GRACE_PERIOD_MS) {
+    const lastSeen = info.lastSeenTrending || 0;
+    if (lastSeen === 0 || now - lastSeen > GRACE_PERIOD_MS) {
       delete statusMap[key];
     } else {
       // Mantém na lista de checagem para garantir que o status 'Normal' seja atualizado no popup
@@ -828,6 +848,7 @@ async function performCheckAllServices() {
         const result = await scrapeServiceWithRetry(tab.id, service.slug, config.source_site);
         const isOutage = result.current >= threshold;
 
+        const lastSeenTrending = statusMap[service.slug]?.lastSeenTrending;
         statusMap[service.slug] = {
           name: service.name,
           current: result.current,
@@ -840,6 +861,7 @@ async function performCheckAllServices() {
           threshold,
           outage: isOutage,
           isTrending: service.isTrending === true,
+          lastSeenTrending,
           ts: Date.now()
         };
         
@@ -859,11 +881,13 @@ async function performCheckAllServices() {
       } catch (error) {
         await addLog(`Erro ao checar ${service.slug}: ${error.message}`, "error");
         console.error(`Erro ao checar ${service.slug}:`, error);
+        const lastSeenTrending = statusMap[service.slug]?.lastSeenTrending;
         statusMap[service.slug] = {
           name: service.name,
           threshold,
           sourceSite: config.source_site,
           error: error.message,
+          lastSeenTrending,
           ts: Date.now()
         };
         alertedSet.delete(service.slug);
@@ -899,13 +923,28 @@ async function performCheckAllServices() {
   });
 }
 
-function checkAllServices() {
-  if (!activeCheckPromise) {
-    activeCheckPromise = performCheckAllServices()
-      .finally(() => {
-        activeCheckPromise = null;
-      });
+async function checkAllServices(isAutomated = false) {
+  if (isAutomated) {
+    try {
+      const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+      if (windows.length === 0) {
+        // Silenciosamente ignora a verificação automática se não houver janelas do navegador abertas para este perfil.
+        // Isso evita que a extensão "acorde" o perfil e abra abas de worker indesejadas.
+        return;
+      }
+    } catch (e) {
+      console.error("Falha ao verificar janelas abertas:", e);
+    }
   }
+
+  if (activeCheckPromise) {
+    return activeCheckPromise;
+  }
+
+  activeCheckPromise = performCheckAllServices()
+    .finally(() => {
+      activeCheckPromise = null;
+    });
 
   return activeCheckPromise;
 }
