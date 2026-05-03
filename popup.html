@@ -27,15 +27,15 @@
   body { width: 360px; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 12px; }
 
   header {
-    display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 11px 14px; border-bottom: 1px solid var(--border); background: var(--surface);
   }
   .logo { 
     font-family: var(--head); font-size: 15px; font-weight: 800; color: #fff; letter-spacing: -.3px; 
-    flex-shrink: 0; min-width: 100px;
+    flex-shrink: 0;
   }
   .logo span { color: var(--accent); }
-  .header-right { display: flex; gap: 10px; align-items: center; flex: 1; justify-content: flex-end; min-width: 0; }
+  .header-right { display: flex; gap: 6px; align-items: center; flex: 1; justify-content: flex-end; min-width: 0; }
   #last-check { 
     color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; 
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -54,8 +54,14 @@
 
   button { cursor: pointer; border: none; font-family: var(--mono); font-size: 11px; border-radius: 4px; padding: 5px 10px; transition: all .15s; }
   button:hover { opacity: .8; }
-  .btn-icon    { background: var(--border); color: var(--text); }
-  .btn-icon:hover { background: var(--muted-bg); opacity: 1; color: #fff; }
+  /* Botão ícone fantasma — sem fundo, só ícone com hover sutil */
+  .btn-icon {
+    background: transparent; color: var(--muted); padding: 4px 6px;
+    border-radius: 6px; font-size: 16px; line-height: 1;
+    border: 1px solid transparent;
+    transition: color .15s, background .15s, border-color .15s;
+  }
+  .btn-icon:hover { opacity: 1; color: var(--text); background: var(--border); border-color: var(--border); }
   .btn-primary { background: var(--accent); color: #fff; font-weight: 600; }
   .btn-small   { background: var(--border); color: var(--text); padding: 3px 8px; font-size: 10px; }
   .btn-save-wide { width: 100%; padding: 9px 12px; border-radius: 6px; margin-top: 10px; }
@@ -71,6 +77,24 @@
   }
   .btn-remove:hover {
     opacity: 1; color: var(--red); border-color: #ff4d4d40; background: #ff4d4d12;
+  }
+
+  #btn-toggle-monitoring {
+    display: flex; align-items: center; gap: 4px;
+    background: #111; border: 1px solid var(--border);
+    border-radius: 12px; padding: 2px 8px 2px 6px;
+    font-size: 9px; font-weight: bold; letter-spacing: .5px;
+    color: var(--muted); cursor: pointer; transition: all .2s;
+  }
+  #btn-toggle-monitoring.enabled {
+    border-color: #00ff8840; color: #00ff88;
+  }
+  #btn-toggle-monitoring.disabled {
+    border-color: #ff4d4d40; color: var(--red);
+  }
+  .toggle-dot {
+    width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+    box-shadow: 0 0 5px currentColor;
   }
 
   .tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); }
@@ -282,7 +306,11 @@
   <div class="logo">DD<span>.</span>Monitor</div>
   <div class="header-right">
     <span id="last-check">—</span>
-    <button class="btn-icon" id="btn-refresh">↺ Checar</button>
+    <button id="btn-toggle-monitoring" class="enabled" title="Ativar/Desativar monitoramento automático">
+      <span class="toggle-dot"></span>
+      <span id="toggle-label">ON</span>
+    </button>
+    <button class="btn-icon" id="btn-refresh" title="Checar agora">↻</button>
   </div>
 </header>
 

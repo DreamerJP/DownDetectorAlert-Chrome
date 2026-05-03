@@ -392,11 +392,14 @@ async function ensureConfig() {
 
 async function scheduleAlarm() {
   const config = await ensureConfig();
+  const { monitoringEnabled = true } = await chrome.storage.local.get("monitoringEnabled");
   await chrome.alarms.clearAll();
-  chrome.alarms.create("check", {
-    delayInMinutes: 0.1,
-    periodInMinutes: config.interval_minutes
-  });
+  if (monitoringEnabled) {
+    chrome.alarms.create("check", {
+      delayInMinutes: 0.1,
+      periodInMinutes: config.interval_minutes
+    });
+  }
 }
 
 async function initializeExtension() {
@@ -935,6 +938,14 @@ async function checkAllServices(isAutomated = false) {
     } catch (e) {
       console.error("Falha ao verificar janelas abertas:", e);
     }
+
+    // Não executa checagem automática se o monitoramento estiver desativado
+    try {
+      const { monitoringEnabled = true } = await chrome.storage.local.get("monitoringEnabled");
+      if (!monitoringEnabled) return;
+    } catch (e) {
+      console.error("Falha ao verificar estado do monitoramento:", e);
+    }
   }
 
   if (activeCheckPromise) {
@@ -980,7 +991,7 @@ function sendNotification(name, slug, current, threshold, eventType = "outage") 
 
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.type === "GET_STATUS") {
-    chrome.storage.local.get(["statusMap", "lastCheck"]).then(reply);
+    chrome.storage.local.get(["statusMap", "lastCheck", "monitoringEnabled"]).then(reply);
     return true;
   }
 
@@ -999,6 +1010,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       reply({ ok: true });
     }).catch(error => reply({ ok: false, error: error.message }));
 
+    return true;
+  }
+
+  if (msg.type === "TOGGLE_MONITORING") {
+    const enabled = msg.enabled === true;
+    chrome.storage.local.set({ monitoringEnabled: enabled }).then(async () => {
+      if (enabled) {
+        await scheduleAlarm();
+      } else {
+        await chrome.alarms.clearAll();
+      }
+      reply({ ok: true, monitoringEnabled: enabled });
+    }).catch(error => reply({ ok: false, error: error.message }));
     return true;
   }
 });

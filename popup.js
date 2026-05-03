@@ -394,7 +394,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
       } else {
         btn.style.display = "block";
         btn.disabled = false;
-        btn.textContent = "↺ Checar";
+        btn.textContent = "↻";
         const spinner = document.getElementById("active-spinner");
         if (spinner) spinner.remove();
       }
@@ -411,14 +411,14 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 document.getElementById("btn-refresh").addEventListener("click", async () => {
   const btn = document.getElementById("btn-refresh");
-  btn.textContent = "...";
+  btn.textContent = "⏳";
   btn.disabled = true;
   const result = await chrome.runtime.sendMessage({ type: "FORCE_CHECK" });
   await refreshStatus();
-  btn.textContent = result?.ok === false ? "Falhou" : "↺ Checar";
+  btn.textContent = result?.ok === false ? "⚠" : "↻";
   if (result?.ok === false) {
     setTimeout(() => {
-      btn.textContent = "↺ Checar";
+      btn.textContent = "↻";
     }, 1500);
   }
   btn.disabled = false;
@@ -503,9 +503,38 @@ document.getElementById("top-enabled").addEventListener("change", e => {
 });
 
 
+// ── Toggle Monitoring ────────────────────────────────────────────────────────
+function applyToggleState(enabled) {
+  const btn = document.getElementById("btn-toggle-monitoring");
+  const label = document.getElementById("toggle-label");
+  if (!btn || !label) return;
+  if (enabled) {
+    btn.className = "enabled";
+    label.textContent = "ON";
+  } else {
+    btn.className = "disabled";
+    label.textContent = "OFF";
+  }
+}
+
+document.getElementById("btn-toggle-monitoring")?.addEventListener("click", async () => {
+  const btn = document.getElementById("btn-toggle-monitoring");
+  const isCurrentlyEnabled = btn.className === "enabled";
+  const newState = !isCurrentlyEnabled;
+  
+  applyToggleState(newState);
+  const result = await chrome.runtime.sendMessage({ type: "TOGGLE_MONITORING", enabled: newState });
+  if (!result?.ok) {
+    applyToggleState(!newState);
+  }
+});
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 async function boot() {
-  const data = await chrome.storage.local.get(["isChecking", "statusText", "checkCompleted", "checkTotal"]);
+  const data = await chrome.storage.local.get(["isChecking", "statusText", "checkCompleted", "checkTotal", "monitoringEnabled"]);
+  
+  // Inicializa o toggle de monitoramento
+  applyToggleState(data.monitoringEnabled !== false);
   const btn = document.getElementById("btn-refresh");
   const el = document.getElementById("last-check");
   const header = document.querySelector("header");
@@ -526,6 +555,7 @@ async function boot() {
     }
   } else {
     btn.style.display = "block";
+    btn.textContent = "↻";
     const spinner = document.getElementById("active-spinner");
     if (spinner) spinner.remove();
   }
