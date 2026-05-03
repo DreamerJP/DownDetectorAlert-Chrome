@@ -390,15 +390,31 @@ async function ensureConfig() {
   return nextConfig;
 }
 
-async function scheduleAlarm() {
+let startupTimeout = null;
+
+async function scheduleAlarm(triggerStartupDelay = false) {
   const config = await ensureConfig();
   const { monitoringEnabled = true } = await chrome.storage.local.get("monitoringEnabled");
   await chrome.alarms.clearAll();
+  
   if (monitoringEnabled) {
+    // Alarme periódico: o primeiro disparo ocorrerá apenas no próximo ciclo (ex: daqui a 10 min)
     chrome.alarms.create("check", {
-      delayInMinutes: 0.1,
+      delayInMinutes: config.interval_minutes,
       periodInMinutes: config.interval_minutes
     });
+
+    // Se for inicialização ou abertura da primeira janela, fazemos a primeira checagem com 20s de delay via setTimeout
+    if (triggerStartupDelay) {
+      if (startupTimeout) clearTimeout(startupTimeout);
+      startupTimeout = setTimeout(() => {
+        chrome.storage.local.get("monitoringEnabled").then(data => {
+          if (data.monitoringEnabled !== false) {
+            checkAllServices(true).catch(e => console.error("Falha na checagem inicial:", e));
+          }
+        });
+      }, 20000);
+    }
   }
 }
 
@@ -407,7 +423,7 @@ async function initializeExtension() {
   // Só agenda o alarme se já houver alguma janela aberta para este perfil
   const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
   if (windows.length > 0) {
-    await scheduleAlarm();
+    await scheduleAlarm(true);
   }
 }
 
@@ -422,7 +438,9 @@ chrome.runtime.onStartup.addListener(() => {
 // Quando uma janela é aberta, garante que o monitoramento está ativo
 chrome.windows.onCreated.addListener(async (window) => {
   if (window.type === 'normal') {
-    await scheduleAlarm();
+    const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+    const isFirstWindow = windows.length <= 1;
+    await scheduleAlarm(isFirstWindow);
   }
 });
 
@@ -431,6 +449,7 @@ chrome.windows.onRemoved.addListener(async () => {
   const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
   if (windows.length === 0) {
     await chrome.alarms.clearAll();
+    if (startupTimeout) clearTimeout(startupTimeout);
     console.log("Última janela fechada. Monitoramento suspenso para economizar recursos.");
   }
 });
