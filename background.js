@@ -111,6 +111,13 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function withTimeout(promise, timeoutMs) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout máximo atingido para o serviço.")), timeoutMs))
+  ]);
+}
+
 function isRetryableServiceError(error) {
   const message = String(error?.message || error || "").trim();
   if (!message) return false;
@@ -542,7 +549,7 @@ async function getOrCreateWorkerTab() {
   return createdTab;
 }
 
-async function updateTabAndWait(tabId, url) {
+async function updateTabAndWait(tabId, url, abortSignal) {
   const tab = await chrome.tabs.get(tabId);
   if (tab.url === url && tab.status === "complete") {
     return;
@@ -551,16 +558,33 @@ async function updateTabAndWait(tabId, url) {
   await chrome.tabs.update(tabId, { url });
 
   return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
+    let timeoutId;
+    let listener;
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      if (listener) chrome.tabs.onUpdated.removeListener(listener);
+      if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
+    };
+
+    const onAbort = () => {
+      cleanup();
+      reject(new Error("Abortado"));
+    };
+
+    if (abortSignal) {
+      if (abortSignal.aborted) return onAbort();
+      abortSignal.addEventListener("abort", onAbort);
+    }
+
+    timeoutId = setTimeout(() => {
+      cleanup();
       reject(new Error("Timeout ao carregar a página."));
     }, 20000);
 
-    const listener = (updatedTabId, changeInfo) => {
+    listener = (updatedTabId, changeInfo) => {
       if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
-
-      clearTimeout(timeoutId);
-      chrome.tabs.onUpdated.removeListener(listener);
+      cleanup();
       resolve();
     };
 
@@ -587,7 +611,7 @@ async function readPageSignals(tabId) {
   };
 }
 
-async function waitForPageSignals(tabId) {
+async function waitForPageSignals(tabId, abortSignal) {
   let lastSignals = null;
   let notifiedCloudflare = false;
   let hasReloaded = false;
@@ -595,6 +619,8 @@ async function waitForPageSignals(tabId) {
   let previousActiveTabId = null;
 
   for (let attempt = 0; attempt < 45; attempt += 1) {
+    if (abortSignal?.aborted) throw new Error("Abortado");
+    
     try {
       lastSignals = await readPageSignals(tabId);
     } catch (_error) {
@@ -678,16 +704,17 @@ function extractHistoryFromSignals(signals) {
   return { payload, history };
 }
 
-async function scrapeService(tabId, slug, sourceSite) {
+async function scrapeService(tabId, slug, sourceSite, abortSignal) {
   const urls = getServiceUrls(slug, sourceSite);
 
   let lastError = null;
 
   for (const url of urls) {
+    if (abortSignal?.aborted) throw new Error("Abortado");
     try {
-      await updateTabAndWait(tabId, url);
+      await updateTabAndWait(tabId, url, abortSignal);
 
-      let signals = await waitForPageSignals(tabId);
+      let signals = await waitForPageSignals(tabId, abortSignal);
       if (signals?.cloudflareBlocked) {
         throw new Error("Cloudflare bloqueou o carregamento da página.");
       }
@@ -733,12 +760,13 @@ async function scrapeService(tabId, slug, sourceSite) {
   throw lastError || new Error("Não foi possível ler os dados do serviço.");
 }
 
-async function scrapeServiceWithRetry(tabId, slug, sourceSite) {
+async function scrapeServiceWithRetry(tabId, slug, sourceSite, abortSignal) {
   let lastError = null;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (abortSignal?.aborted) throw new Error("Abortado");
     try {
-      return await scrapeService(tabId, slug, sourceSite);
+      return await scrapeService(tabId, slug, sourceSite, abortSignal);
     } catch (error) {
       lastError = error;
 
@@ -865,9 +893,10 @@ async function performCheckAllServices() {
       const service = servicesToCheck[index];
       const threshold = sanitizeThreshold(service.threshold);
 
+      const abortController = new AbortController();
       try {
         await addLog(`Checando: ${service.name} (${service.slug})...`);
-        const result = await scrapeServiceWithRetry(tab.id, service.slug, config.source_site);
+        const result = await withTimeout(scrapeServiceWithRetry(tab.id, service.slug, config.source_site, abortController.signal), 40000);
         const isOutage = result.current >= threshold;
 
         const lastSeenTrending = statusMap[service.slug]?.lastSeenTrending;
@@ -913,6 +942,8 @@ async function performCheckAllServices() {
           ts: Date.now()
         };
         alertedSet.delete(service.slug);
+      } finally {
+        abortController.abort();
       }
 
       await persistProgress(statusMap, alertedSet, {

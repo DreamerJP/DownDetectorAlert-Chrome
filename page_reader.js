@@ -99,7 +99,8 @@
 
               if (!Number.isFinite(length) || length < candidate.width * 0.4) continue;
               if (!Number.isFinite(bbox.width) || bbox.width < candidate.width * 0.35) continue;
-              if (!Number.isFinite(bbox.height) || bbox.height < 8) continue;
+              if (!Number.isFinite(bbox.height)) continue;
+              if (bbox.height < 8 && isDashed) continue;
 
               let score = (bbox.width * 2) + length + (bbox.height * 4);
               if (hasStroke) score += 500;
@@ -340,8 +341,11 @@
           const childrenLabels = Array.from(item.querySelectorAll("[aria-label]")).map(el => el.getAttribute("aria-label")).join(" ");
           const cardText = item.innerText + " " + childrenLabels;
           
-          const hasProblem = /problema|problem|outage|falha|estabilidade|estável|instabilidade|baixar|down/i.test(cardText) ||
-                             item.querySelector(".indicator-problem, .indicator-outage, .problem, .danger, .status-red, .status-yellow") !== null;
+          const isNegative = /nenhum problema|sem problema|no problem|não mostram problemas/i.test(cardText);
+          const hasProblemText = /problema|problem|outage|falha|instabilidade|down/i.test(cardText);
+
+          const hasProblem = (!isNegative && hasProblemText) ||
+                             item.querySelector(".indicator-problem, .indicator-outage, .problem, .danger, .status-red, .status-yellow, .status-warning") !== null;
 
           services.push({ name, slug, hasProblem });
           if (services.length >= 20) break; // Limite de busca
