@@ -258,6 +258,18 @@
         };
       };
 
+      // Desabilita animações do Recharts para leitura instantânea
+      const style = document.createElement('style');
+      style.textContent = `
+        .recharts-curve, .recharts-area-area, .recharts-rectangle, .recharts-bar-rectangle, .recharts-area {
+          transition: none !important;
+          animation: none !important;
+          animation-duration: 0s !important;
+          transition-duration: 0s !important;
+        }
+      `;
+      (document.head || document.documentElement).appendChild(style);
+
       const bodyText = document.body?.innerText || "";
       const hasCloudflareElements = Boolean(
         document.getElementById("challenge-stage") ||
@@ -313,10 +325,52 @@
         }
       }
 
+      const extractPeakFromElements = () => {
+        try {
+          // Opção 2: Busca em tooltips do Recharts
+          const tooltipValue = document.querySelector(".recharts-tooltip-item-value, .recharts-default-tooltip");
+          if (tooltipValue) {
+             const text = tooltipValue.innerText;
+             const match = text.match(/(\d+)/);
+             if (match) return parseInt(match[1], 10);
+          }
+
+          // Opção 1: Busca no aria-label (específico para o formato do Downdetector)
+          const ariaLabel = document.querySelector("[aria-label*='reportes'], [aria-label*='reports']");
+          if (ariaLabel) {
+             const text = ariaLabel.getAttribute("aria-label");
+             const peakMatch = text.match(/(?:pico de|peak of)\s+([\d.,]+)/i) || text.match(/([\d.,]+)\s+reportes/i);
+             if (peakMatch) return parseInt(peakMatch[1].replace(/[^\d]/g, ""), 10);
+          }
+
+          return null;
+        } catch { return null; }
+      };
+
+      const peakFromElements = extractPeakFromElements();
       const capture = window.__DDMONITOR_CAPTURE__?.lastReport || null;
       const capturedUrl = capture?.url || null;
       if (!reportUrl && capturedUrl) reportUrl = capturedUrl;
-      const svgChart = extractSvgChart(peak);
+      
+      // Usamos o pico real para calibrar a escala do gráfico SVG
+      const svgChart = extractSvgChart(peakFromElements ?? peak);
+
+      if (peakFromElements !== null && svgChart?.history?.length > 0) {
+        const historyValues = svgChart.history.map(p => p.value).filter(Number.isFinite);
+        const currentMax = Math.max(...historyValues, 0);
+        
+        if (currentMax > 0) {
+          const scaleFactor = peakFromElements / currentMax;
+          svgChart.history.forEach(point => {
+            if (Number.isFinite(point.value)) {
+              point.value = Math.round(point.value * scaleFactor);
+            }
+          });
+        } else {
+          // Se o gráfico estava zerado mas temos um pico no texto, forçamos o último ponto
+          svgChart.history[svgChart.history.length - 1].value = peakFromElements;
+        }
+      }
 
       const extractTrendingServices = () => {
         const services = [];
@@ -342,10 +396,12 @@
           const cardText = item.innerText + " " + childrenLabels;
           
           const isNegative = /nenhum problema|sem problema|no problem|não mostram problemas/i.test(cardText);
-          const hasProblemText = /problema|problem|outage|falha|instabilidade|down/i.test(cardText);
-
-          const hasProblem = (!isNegative && hasProblemText) ||
-                             item.querySelector(".indicator-problem, .indicator-outage, .problem, .danger, .status-red, .status-yellow, .status-warning") !== null;
+          const hasActiveIndicator = item.querySelector(".indicator-problem, .indicator-outage, .problem, .danger, .status-red, .status-yellow, .status-warning") !== null;
+          
+          // Only consider it a problem if there's a visual indicator OR a specific "Possible problems" text, 
+          // avoiding generic titles like "Problems with..."
+          const hasProblem = (!isNegative && hasActiveIndicator) || 
+                             /possíveis problemas|possible problems|problemas detectados|outage detected/i.test(cardText);
 
           services.push({ name, slug, hasProblem });
           if (services.length >= 20) break; // Limite de busca
@@ -361,7 +417,7 @@
         cloudflareBlocked,
         reportUrl,
         reportPayload: capture?.payload ?? null,
-        peak: Number.isFinite(peak) ? peak : null,
+        peak: Number.isFinite(peakFromElements) ? peakFromElements : (Number.isFinite(peak) ? peak : null),
         svgHistory: Array.isArray(svgChart?.history) ? svgChart.history : [],
         tickLabels: Array.isArray(svgChart?.tickLabels) ? svgChart.tickLabels : [],
         periodLabel: svgChart?.periodLabel || extractPeriodLabel(),

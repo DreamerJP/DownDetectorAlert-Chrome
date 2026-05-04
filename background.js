@@ -7,6 +7,7 @@ const DEFAULT_CONFIG = {
   source_site: DEFAULT_SOURCE_SITE,
   top_services_enabled: DEFAULT_TOP_SERVICES_ENABLED,
   top_services_count: DEFAULT_TOP_SERVICES_COUNT,
+  top_services_threshold: DEFAULT_TOP_SERVICES_THRESHOLD,
   services: [
     { slug: "youtube", name: "YouTube", threshold: DEFAULT_THRESHOLD },
     { slug: "netflix", name: "Netflix", threshold: DEFAULT_THRESHOLD },
@@ -715,6 +716,11 @@ async function scrapeService(tabId, slug, sourceSite, abortSignal) {
       await updateTabAndWait(tabId, url, abortSignal);
 
       let signals = await waitForPageSignals(tabId, abortSignal);
+      
+      // Aguarda as animações de entrada do gráfico (Recharts pode ser lento em algumas máquinas)
+      // Esperamos 3 segundos para garantir que a linha chegou no topo real
+      await delay(3000);
+
       if (signals?.cloudflareBlocked) {
         throw new Error("Cloudflare bloqueou o carregamento da página.");
       }
@@ -723,7 +729,7 @@ async function scrapeService(tabId, slug, sourceSite, abortSignal) {
 
       if (!history.length) {
         for (let attempt = 0; attempt < 4 && !history.length; attempt += 1) {
-          await delay(450);
+          await delay(1000);
           signals = await readPageSignals(tabId);
           const extracted = extractHistoryFromSignals(signals);
           payload = extracted.payload || payload;
@@ -828,7 +834,7 @@ async function performCheckAllServices() {
           if (!servicesToCheck.find(existing => existing.slug === s.slug)) {
             servicesToCheck.push({
               ...s,
-              threshold: DEFAULT_THRESHOLD,
+              threshold: config.top_services_threshold || DEFAULT_TOP_SERVICES_THRESHOLD,
               isTrending: true
             });
           }
@@ -898,6 +904,13 @@ async function performCheckAllServices() {
         await addLog(`Checando: ${service.name} (${service.slug})...`);
         const result = await withTimeout(scrapeServiceWithRetry(tab.id, service.slug, config.source_site, abortController.signal), 40000);
         const isOutage = result.current >= threshold;
+
+        // Se for Trending e não atingiu o limiar, remove do statusMap para não exibir no popup
+        if (service.isTrending && result.current < threshold) {
+          delete statusMap[service.slug];
+          await addLog(`Ignorando trending: ${service.name} (${result.current} < ${threshold})`, "info");
+          continue;
+        }
 
         const lastSeenTrending = statusMap[service.slug]?.lastSeenTrending;
         statusMap[service.slug] = {

@@ -438,7 +438,8 @@ async function loadConfig() {
   const topEnabled = config.top_services_enabled === true;
   document.getElementById("top-enabled").checked = topEnabled;
   document.getElementById("top-count").value = config.top_services_count || 5;
-  document.getElementById("top-count-group").style.display = topEnabled ? "block" : "none";
+  document.getElementById("top-threshold").value = config.top_services_threshold || DEFAULT_TOP_SERVICES_THRESHOLD;
+  document.getElementById("top-count-group").style.display = topEnabled ? "flex" : "none";
 
   currentServices = (config.services || []).map(service => ({
     ...service,
@@ -491,6 +492,7 @@ document.getElementById("btn-save").addEventListener("click", async () => {
     source_site: document.getElementById("source-site").value || DEFAULT_SOURCE_SITE,
     top_services_enabled: document.getElementById("top-enabled").checked,
     top_services_count: parseInt(document.getElementById("top-count").value) || 5,
+    top_services_threshold: parseInt(document.getElementById("top-threshold").value) || DEFAULT_TOP_SERVICES_THRESHOLD,
     services: currentServices.filter(s => s.slug)
   };
   await chrome.runtime.sendMessage({ type: "SAVE_CONFIG", config });
@@ -499,7 +501,7 @@ document.getElementById("btn-save").addEventListener("click", async () => {
 });
 
 document.getElementById("top-enabled").addEventListener("change", e => {
-  document.getElementById("top-count-group").style.display = e.target.checked ? "block" : "none";
+  document.getElementById("top-count-group").style.display = e.target.checked ? "flex" : "none";
 });
 
 
