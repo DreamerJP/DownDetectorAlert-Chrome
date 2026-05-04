@@ -366,9 +366,6 @@
               point.value = Math.round(point.value * scaleFactor);
             }
           });
-        } else {
-          // Se o gráfico estava zerado mas temos um pico no texto, forçamos o último ponto
-          svgChart.history[svgChart.history.length - 1].value = peakFromElements;
         }
       }
 

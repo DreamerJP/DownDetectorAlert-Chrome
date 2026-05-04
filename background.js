@@ -93,6 +93,7 @@ function normalizeConfig(config) {
     source_site: sanitizeSourceSite(upgraded.source_site),
     top_services_enabled: upgraded.top_services_enabled === true,
     top_services_count: Math.max(1, Math.min(20, parseInt(upgraded.top_services_count, 10) || DEFAULT_TOP_SERVICES_COUNT)),
+    top_services_threshold: Math.max(1, parseInt(upgraded.top_services_threshold, 10) || DEFAULT_TOP_SERVICES_THRESHOLD),
     services: inputServices
       .filter(service => service && service.slug)
       .map(service => ({
@@ -717,13 +718,13 @@ async function scrapeService(tabId, slug, sourceSite, abortSignal) {
 
       let signals = await waitForPageSignals(tabId, abortSignal);
       
-      // Aguarda as animações de entrada do gráfico (Recharts pode ser lento em algumas máquinas)
-      // Esperamos 3 segundos para garantir que a linha chegou no topo real
-      await delay(3000);
-
       if (signals?.cloudflareBlocked) {
         throw new Error("Cloudflare bloqueou o carregamento da página.");
       }
+
+      // Aguarda as animações de entrada do gráfico (Recharts pode ser lento em algumas máquinas)
+      // Esperamos 3 segundos para garantir que a linha chegou no topo real
+      await delay(3000);
 
       let { payload, history } = extractHistoryFromSignals(signals);
 
