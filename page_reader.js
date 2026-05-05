@@ -388,20 +388,9 @@
           let name = nameElement.textContent.trim().split("\n")[0].trim();
           if (name.length > 30) name = name.substring(0, 27) + "...";
 
-          // Busca por indicadores de problemas em qualquer lugar dentro do card
-          const childrenLabels = Array.from(item.querySelectorAll("[aria-label]")).map(el => el.getAttribute("aria-label")).join(" ");
-          const cardText = item.innerText + " " + childrenLabels;
-          
-          const isNegative = /nenhum problema|sem problema|no problem|não mostram problemas/i.test(cardText);
-          const hasActiveIndicator = item.querySelector(".indicator-problem, .indicator-outage, .problem, .danger, .status-red, .status-yellow, .status-warning") !== null;
-          
-          // Only consider it a problem if there's a visual indicator OR a specific "Possible problems" text, 
-          // avoiding generic titles like "Problems with..."
-          const hasProblem = (!isNegative && hasActiveIndicator) || 
-                             /possíveis problemas|possible problems|problemas detectados|outage detected/i.test(cardText);
-
-          services.push({ name, slug, hasProblem });
-          if (services.length >= 20) break; // Limite de busca
+          // A posição na lista é o único critério relevante — sem filtro por indicadores visuais
+          services.push({ name, slug });
+          if (services.length >= 20) break; // Limite de busca (mais do que suficiente para qualquer top_services_count)
         }
         return services;
       };

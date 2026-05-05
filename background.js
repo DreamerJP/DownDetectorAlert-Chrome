@@ -821,24 +821,26 @@ async function performCheckAllServices() {
 
       if (homeSignals && Array.isArray(homeSignals.trendingServices)) {
         const topCount = config.top_services_count || DEFAULT_TOP_SERVICES_COUNT;
-        const trending = homeSignals.trendingServices
-          .filter(s => s.hasProblem)
-          .slice(0, topCount);
 
-        if (trending.length > 0) {
-          await addLog(`Encontrados ${trending.length} serviços trending: ${trending.map(s => s.name).join(", ")}`, "success");
-        } else {
-          await addLog("Nenhum serviço em destaque com problemas no momento.", "info");
+        // Percorre a lista da home em ordem de posição.
+        // Pula serviços que já estão na lista manual (evita checagem dupla).
+        // Para quando atingir topCount serviços únicos adicionados.
+        const added = [];
+        for (const s of homeSignals.trendingServices) {
+          if (added.length >= topCount) break;
+          if (servicesToCheck.find(existing => existing.slug === s.slug)) continue;
+          servicesToCheck.push({
+            ...s,
+            threshold: config.top_services_threshold || DEFAULT_TOP_SERVICES_THRESHOLD,
+            isTrending: true
+          });
+          added.push(s.name);
         }
 
-        for (const s of trending) {
-          if (!servicesToCheck.find(existing => existing.slug === s.slug)) {
-            servicesToCheck.push({
-              ...s,
-              threshold: config.top_services_threshold || DEFAULT_TOP_SERVICES_THRESHOLD,
-              isTrending: true
-            });
-          }
+        if (added.length > 0) {
+          await addLog(`Top ${added.length} da home adicionados para checagem: ${added.join(", ")}`, "info");
+        } else {
+          await addLog("Todos os serviços do topo da home já estão na lista manual.", "info");
         }
       }
     } catch (error) {
@@ -906,10 +908,10 @@ async function performCheckAllServices() {
         const result = await withTimeout(scrapeServiceWithRetry(tab.id, service.slug, config.source_site, abortController.signal), 40000);
         const isOutage = result.current >= threshold;
 
-        // Se for Trending e não atingiu o limiar, remove do statusMap para não exibir no popup
+        // Se for da home e não atingiu o limiar de reports, remove do statusMap para não exibir no popup
         if (service.isTrending && result.current < threshold) {
           delete statusMap[service.slug];
-          await addLog(`Ignorando trending: ${service.name} (${result.current} < ${threshold})`, "info");
+          await addLog(`${service.name}: ${result.current} reportes (abaixo do limiar de ${threshold}) — sem problema.`, "info");
           continue;
         }
 
