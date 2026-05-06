@@ -912,6 +912,11 @@ async function performCheckAllServices() {
         if (service.isTrending && result.current < threshold) {
           delete statusMap[service.slug];
           await addLog(`${service.name}: ${result.current} reportes (abaixo do limiar de ${threshold}) — sem problema.`, "info");
+          // Se havia alerta ativo para este serviço, notifica recovery e limpa o badge
+          if (alertedSet.has(service.slug)) {
+            sendNotification(service.name, service.slug, result.current, threshold, "recovery");
+            alertedSet.delete(service.slug);
+          }
           continue;
         }
 
