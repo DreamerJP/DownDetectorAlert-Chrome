@@ -838,9 +838,9 @@ async function performCheckAllServices() {
         }
 
         if (added.length > 0) {
-          await addLog(`Top ${added.length} da home adicionados para checagem: ${added.join(", ")}`, "info");
+          await addLog(`Home: +${added.length} serviços detectados (${added.join(", ")})`, "info");
         } else {
-          await addLog("Todos os serviços do topo da home já estão na lista manual.", "info");
+          await addLog("Home: Nenhum serviço novo detectado.", "info");
         }
       }
     } catch (error) {
@@ -904,14 +904,14 @@ async function performCheckAllServices() {
 
       const abortController = new AbortController();
       try {
-        await addLog(`Checando: ${service.name} (${service.slug})...`);
+        await addLog(`Checando ${service.name}...`);
         const result = await withTimeout(scrapeServiceWithRetry(tab.id, service.slug, config.source_site, abortController.signal), 40000);
         const isOutage = result.current >= threshold;
 
         // Se for da home e não atingiu o limiar de reports, remove do statusMap para não exibir no popup
         if (service.isTrending && result.current < threshold) {
           delete statusMap[service.slug];
-          await addLog(`${service.name}: ${result.current} reportes (abaixo do limiar de ${threshold}) — sem problema.`, "info");
+          await addLog(`${service.name}: ${result.current} (Limiar ${threshold})`, "success");
           // Se havia alerta ativo para este serviço, notifica recovery e limpa o badge
           if (alertedSet.has(service.slug)) {
             sendNotification(service.name, service.slug, result.current, threshold, "recovery");
@@ -937,7 +937,7 @@ async function performCheckAllServices() {
           ts: Date.now()
         };
         
-        await addLog(`Checado: ${service.name} (${result.current}/${threshold})`, isOutage ? "error" : "success");
+        await addLog(`${service.name}: ${result.current}/${threshold}`, isOutage ? "error" : "success");
 
         if (isOutage) {
           if (!alertedSet.has(service.slug)) {
