@@ -255,7 +255,7 @@ async function performCheckAllServices() {
         if (service.isTrending && result.current < threshold) {
           delete statusMap[service.slug];
           const sourceTag = result.source ? ` [${result.source}]` : "";
-          await addLog(`${shortName(service.name)}: ${result.current} (Limiar ${threshold})${sourceTag}`, "success");
+          await addLog(`${shortName(service.name)}: ${result.current}/${threshold}${sourceTag}`, "success");
           // Se havia alerta ativo para este serviço, notifica recovery e limpa o badge
           if (alertedSet.has(service.slug)) {
             sendNotification(service.name, service.slug, result.current, threshold, "recovery");
@@ -340,11 +340,26 @@ async function performCheckAllServices() {
       await delay(250);
     }
   } finally {
+    // 1. Volta para worker.html (página leve da extensão).
+    // 2. Descarta a aba: o Chrome libera a memória mantendo a aba na lista.
+    //    Na próxima checagem, chrome.tabs.update revive automaticamente.
+    //    Reduz o consumo idle de ~400 MB para algumas dezenas.
     try {
       const workerUrl = chrome.runtime.getURL("worker.html");
       const latestTab = await chrome.tabs.get(workerTabId);
       if (latestTab.url !== workerUrl) {
         await chrome.tabs.update(workerTabId, { url: workerUrl });
+        await delay(800); // worker.html assentar antes do discard
+      }
+      try {
+        const discarded = await chrome.tabs.discard(workerTabId);
+        // O Chrome pode atribuir um novo id à aba descartada.
+        if (discarded?.id && discarded.id !== workerTabId) {
+          await chrome.storage.local.set({ [WORKER_TAB_ID_KEY]: discarded.id });
+        }
+      } catch (_discardError) {
+        // Discard pode falhar se a aba estiver ativa, em foreground, ou já descartada.
+        // Não é crítico — só não economizou memória nesta vez.
       }
     } catch (_error) { }
   }
