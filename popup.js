@@ -7,7 +7,13 @@ function escapeHtml(text) {
 }
 
 function escapeAttr(text) {
-  return String(text ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/`/g, "&#96;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -303,10 +309,19 @@ function renderStatus(statusMap, lastCheck) {
         })
         : '<div class="chart-empty">Sem histórico real disponível no momento.</div>';
 
+    const iconCandidates = Array.isArray(info.iconUrls) && info.iconUrls.length
+      ? info.iconUrls
+      : (info.iconUrl ? [info.iconUrl] : []);
+
+    const iconHtml = iconCandidates.length
+      ? `<img class="svc-icon" src="${escapeAttr(iconCandidates[0])}" data-fallbacks="${escapeAttr(JSON.stringify(iconCandidates.slice(1)))}" loading="lazy" alt="">`
+      : "";
+
     html += `
       <div class="svc-row">
         <div class="svc-header">
           <div class="dot ${dotCls}"></div>
+          ${iconHtml}
           <div style="flex:1;min-width:0">
             <div class="svc-name">${escapeHtml(info.name)}</div>
             <div class="svc-detail">${escapeHtml(detail)}</div>
@@ -326,6 +341,19 @@ function renderStatus(statusMap, lastCheck) {
   list.querySelectorAll(".svc-header").forEach(header => {
     header.addEventListener("click", () => {
       header.parentElement.classList.toggle("expanded");
+    });
+  });
+
+  list.querySelectorAll(".svc-icon").forEach(img => {
+    img.addEventListener("error", () => {
+      let fallbacks = [];
+      try { fallbacks = JSON.parse(img.dataset.fallbacks || "[]"); } catch (_) {}
+      if (fallbacks.length === 0) {
+        img.style.display = "none";
+        return;
+      }
+      img.dataset.fallbacks = JSON.stringify(fallbacks.slice(1));
+      img.src = fallbacks[0];
     });
   });
 
@@ -497,7 +525,7 @@ document.getElementById("btn-save").addEventListener("click", async () => {
   };
   await chrome.runtime.sendMessage({ type: "SAVE_CONFIG", config });
   btn.textContent = "✓ Salvo!";
-  setTimeout(() => btn.textContent = "Salvar", 1500);
+  setTimeout(() => btn.textContent = "Salvar configurações", 1500);
 });
 
 document.getElementById("top-enabled").addEventListener("change", e => {

@@ -358,8 +358,10 @@
       if (peakFromElements !== null && svgChart?.history?.length > 0) {
         const historyValues = svgChart.history.map(p => p.value).filter(Number.isFinite);
         const currentMax = Math.max(...historyValues, 0);
-        
-        if (currentMax > 0) {
+
+        // Só reescala se o gráfico já tem magnitude próxima do pico real.
+        // Evita amplificar ruído de SVG (ex: pico 1500, max do SVG 3 → fator 500x distorce tudo).
+        if (currentMax >= peakFromElements * 0.5) {
           const scaleFactor = peakFromElements / currentMax;
           svgChart.history.forEach(point => {
             if (Number.isFinite(point.value)) {
@@ -368,6 +370,75 @@
           });
         }
       }
+
+      // Os logos do Downdetector vêm via Cloudflare image resizing
+      // (ex: cdn3.../cdn-cgi/image/width=750/cdn2.../static/uploads/logo/<hash>.png).
+      // Trocamos por width=64 — suficiente para o ícone 18x18 do popup, inclusive em retina.
+      const downsizeLogoUrl = url => {
+        if (!url || !url.startsWith("http")) return null;
+        if (url.includes("/cdn-cgi/image/")) {
+          return url.replace(/\/cdn-cgi\/image\/[^/]+/, "/cdn-cgi/image/width=64");
+        }
+        return url;
+      };
+
+      const extractIconUrl = item => {
+        const img = item.querySelector("img");
+        if (!img) return null;
+        return downsizeLogoUrl(img.getAttribute("src") || img.src || null);
+      };
+
+      // Na página de detalhe de um serviço, o logo principal sempre tem
+      // "/static/uploads/logo/" no src e fica dentro de um <a> que aponta pro
+      // domínio oficial (ex: vivo.com.br). Retornamos uma lista de URLs em
+      // ordem de preferência para que o popup tente uma a uma (chain de fallback).
+      const extractServiceIconUrls = () => {
+        let officialDomain = null;
+        let fallbackLogo = null;
+
+        for (const img of document.querySelectorAll("img")) {
+          const src = img.getAttribute("src") || img.src || "";
+          const srcset = img.getAttribute("srcset") || "";
+          const hasLogoPath = src.includes("/static/uploads/logo/") ||
+            srcset.includes("/static/uploads/logo/");
+          if (!hasLogoPath) continue;
+
+          if (!fallbackLogo) {
+            if (src.includes("/static/uploads/logo/")) {
+              fallbackLogo = downsizeLogoUrl(src);
+            } else {
+              const first = srcset.match(/(https?:\/\/\S+)/);
+              if (first) fallbackLogo = downsizeLogoUrl(first[1]);
+            }
+          }
+
+          if (!officialDomain) {
+            const anchor = img.closest("a[href^='http']");
+            if (anchor) {
+              try {
+                const linkUrl = new URL(anchor.getAttribute("href") || "");
+                if (linkUrl.hostname && !linkUrl.hostname.includes("downdetector.")) {
+                  // Remove "www." — serviços de favicon geralmente indexam pelo
+                  // domínio raiz (ex: whatsapp.com, não www.whatsapp.com).
+                  officialDomain = linkUrl.hostname.replace(/^www\./i, "");
+                }
+              } catch (_error) {}
+            }
+          }
+
+          if (officialDomain && fallbackLogo) break;
+        }
+
+        const urls = [];
+        if (officialDomain) {
+          // DuckDuckGo: devolve 404 quando não tem (deixa o onerror disparar).
+          urls.push(`https://icons.duckduckgo.com/ip3/${officialDomain}.ico`);
+          // Google: ampla cobertura, mas pode servir placeholder genérico (200 OK).
+          urls.push(`https://www.google.com/s2/favicons?domain=${officialDomain}&sz=64`);
+        }
+        if (fallbackLogo) urls.push(fallbackLogo);
+        return urls;
+      };
 
       const extractTrendingServices = () => {
         const services = [];
@@ -389,7 +460,7 @@
           if (name.length > 30) name = name.substring(0, 27) + "...";
 
           // A posição na lista é o único critério relevante — sem filtro por indicadores visuais
-          services.push({ name, slug });
+          services.push({ name, slug, iconUrl: extractIconUrl(item) });
           if (services.length >= 20) break; // Limite de busca (mais do que suficiente para qualquer top_services_count)
         }
         return services;
@@ -400,6 +471,7 @@
       return {
         isHomePage,
         trendingServices: isHomePage ? extractTrendingServices() : [],
+        serviceIconUrls: isHomePage ? [] : extractServiceIconUrls(),
         cloudflareBlocked,
         reportUrl,
         reportPayload: capture?.payload ?? null,

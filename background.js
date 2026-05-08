@@ -30,6 +30,7 @@ const LEGACY_DEFAULT_THRESHOLDS = {
 };
 
 let activeCheckPromise = null;
+let activeCheckAbortController = null;
 const TRANSIENT_SERVICE_ERROR_PATTERNS = [
   /timeout/i,
   /o gr[aá]fico real n[aã]o apareceu/i,
@@ -399,13 +400,11 @@ async function ensureConfig() {
   return nextConfig;
 }
 
-let startupTimeout = null;
-
 async function scheduleAlarm(triggerStartupDelay = false) {
   const config = await ensureConfig();
   const { monitoringEnabled = true } = await chrome.storage.local.get("monitoringEnabled");
   await chrome.alarms.clearAll();
-  
+
   if (monitoringEnabled) {
     // Alarme periódico: o primeiro disparo ocorrerá apenas no próximo ciclo (ex: daqui a 10 min)
     chrome.alarms.create("check", {
@@ -413,16 +412,11 @@ async function scheduleAlarm(triggerStartupDelay = false) {
       periodInMinutes: config.interval_minutes
     });
 
-    // Se for inicialização ou abertura da primeira janela, fazemos a primeira checagem com 20s de delay via setTimeout
+    // Primeira checagem após 30s — usamos chrome.alarms (e não setTimeout) porque
+    // o service worker pode ser encerrado por inatividade antes do timer disparar.
+    // O mínimo seguro em produção é 0.5min (30s).
     if (triggerStartupDelay) {
-      if (startupTimeout) clearTimeout(startupTimeout);
-      startupTimeout = setTimeout(() => {
-        chrome.storage.local.get("monitoringEnabled").then(data => {
-          if (data.monitoringEnabled !== false) {
-            checkAllServices(true).catch(e => console.error("Falha na checagem inicial:", e));
-          }
-        });
-      }, 20000);
+      chrome.alarms.create("startup-check", { delayInMinutes: 0.5 });
     }
   }
 }
@@ -458,14 +452,17 @@ chrome.windows.onRemoved.addListener(async () => {
   const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
   if (windows.length === 0) {
     await chrome.alarms.clearAll();
-    if (startupTimeout) clearTimeout(startupTimeout);
     console.log("Última janela fechada. Monitoramento suspenso para economizar recursos.");
   }
 });
 
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === "check") {
-    checkAllServices(true).catch(error => console.error("Falha na checagem:", error));
+  if (alarm.name === "check" || alarm.name === "startup-check") {
+    chrome.storage.local.get("monitoringEnabled").then(data => {
+      if (data.monitoringEnabled !== false) {
+        checkAllServices(true).catch(error => console.error("Falha na checagem:", error));
+      }
+    });
   }
 });
 
@@ -756,6 +753,7 @@ async function scrapeService(tabId, slug, sourceSite, abortSignal) {
         peak,
         baselineCurrent,
         history,
+        iconUrls: Array.isArray(signals?.serviceIconUrls) ? signals.serviceIconUrls : [],
         periodLabel: signals?.periodLabel || "24h",
         tickLabels: Array.isArray(signals?.tickLabels) ? signals.tickLabels : []
       };
@@ -896,16 +894,21 @@ async function performCheckAllServices() {
   }
 
   const totalServices = servicesToCheck.length;
+  const abortSignal = activeCheckAbortController?.signal;
 
   try {
     for (let index = 0; index < servicesToCheck.length; index += 1) {
+      if (abortSignal?.aborted) {
+        await addLog("Verificação cancelada pelo usuário.", "warn");
+        break;
+      }
+
       const service = servicesToCheck[index];
       const threshold = sanitizeThreshold(service.threshold);
 
-      const abortController = new AbortController();
       try {
         await addLog(`Checando ${service.name}...`);
-        const result = await withTimeout(scrapeServiceWithRetry(tab.id, service.slug, config.source_site, abortController.signal), 40000);
+        const result = await withTimeout(scrapeServiceWithRetry(tab.id, service.slug, config.source_site, abortSignal), 25000);
         const isOutage = result.current >= threshold;
 
         // Se for da home e não atingiu o limiar de reports, remove do statusMap para não exibir no popup
@@ -921,6 +924,16 @@ async function performCheckAllServices() {
         }
 
         const lastSeenTrending = statusMap[service.slug]?.lastSeenTrending;
+        const previousIconUrls = statusMap[service.slug]?.iconUrls;
+        // Prioridade: candidatos da página de detalhe (autoritativo) > logo do card da home (trending) > anterior
+        let iconUrls = [];
+        if (Array.isArray(result.iconUrls) && result.iconUrls.length) {
+          iconUrls = result.iconUrls;
+        } else if (service.iconUrl) {
+          iconUrls = [service.iconUrl];
+        } else if (Array.isArray(previousIconUrls) && previousIconUrls.length) {
+          iconUrls = previousIconUrls;
+        }
         statusMap[service.slug] = {
           name: service.name,
           current: result.current,
@@ -933,6 +946,7 @@ async function performCheckAllServices() {
           threshold,
           outage: isOutage,
           isTrending: service.isTrending === true,
+          iconUrls,
           lastSeenTrending,
           ts: Date.now()
         };
@@ -954,17 +968,24 @@ async function performCheckAllServices() {
         await addLog(`Erro ao checar ${service.slug}: ${error.message}`, "error");
         console.error(`Erro ao checar ${service.slug}:`, error);
         const lastSeenTrending = statusMap[service.slug]?.lastSeenTrending;
+        const previousIconUrls = statusMap[service.slug]?.iconUrls;
+        let iconUrls = [];
+        if (service.iconUrl) {
+          iconUrls = [service.iconUrl];
+        } else if (Array.isArray(previousIconUrls) && previousIconUrls.length) {
+          iconUrls = previousIconUrls;
+        }
         statusMap[service.slug] = {
           name: service.name,
           threshold,
           sourceSite: config.source_site,
           error: error.message,
+          isTrending: service.isTrending === true,
+          iconUrls,
           lastSeenTrending,
           ts: Date.now()
         };
         alertedSet.delete(service.slug);
-      } finally {
-        abortController.abort();
       }
 
       await persistProgress(statusMap, alertedSet, {
@@ -1023,9 +1044,11 @@ async function checkAllServices(isAutomated = false) {
     return activeCheckPromise;
   }
 
+  activeCheckAbortController = new AbortController();
   activeCheckPromise = performCheckAllServices()
     .finally(() => {
       activeCheckPromise = null;
+      activeCheckAbortController = null;
     });
 
   return activeCheckPromise;
@@ -1091,6 +1114,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
         await scheduleAlarm();
       } else {
         await chrome.alarms.clearAll();
+        // Cancela checagem em curso para não desperdiçar recursos
+        if (activeCheckAbortController) {
+          activeCheckAbortController.abort();
+        }
       }
       reply({ ok: true, monitoringEnabled: enabled });
     }).catch(error => reply({ ok: false, error: error.message }));

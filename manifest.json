@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Downdetector Monitor",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Monitora serviços no Downdetector e avisa quando há falhas.",
   "permissions": [
     "alarms",
