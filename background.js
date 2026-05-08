@@ -21,6 +21,24 @@ async function addLog(msg, type = "info") {
   } catch (e) { console.error("Log failed", e); }
 }
 
+// Abrevia nomes longos para os logs ficarem alinhados no popup estreito (360px).
+// Mantém palavras curtas inteiras e abrevia as longas com ponto final.
+// Ex: "Caixa Econômica Federal" → "Caixa Econ. Fed."
+function shortName(name, maxLen = 22) {
+  if (!name || name.length <= maxLen) return name;
+  const parts = name.split(/\s+/);
+  if (parts.length === 1) return name.substring(0, maxLen - 1) + "…";
+
+  const abbreviated = parts.map((part, i) => {
+    if (i === 0) return part;                  // mantém a primeira palavra
+    if (part.length <= 4) return part;          // palavras curtas ficam inteiras
+    return part.substring(0, 4) + ".";          // demais viram "Word."
+  }).join(" ");
+
+  if (abbreviated.length <= maxLen) return abbreviated;
+  return abbreviated.substring(0, maxLen - 1) + "…";
+}
+
 function sendNotification(name, slug, current, threshold, eventType = "outage") {
   const isRecovery = eventType === "recovery";
   chrome.notifications.create(`dd-${slug}-${eventType}-${Date.now()}`, {
@@ -157,7 +175,7 @@ async function performCheckAllServices() {
         }
 
         if (added.length > 0) {
-          await addLog(`Home: +${added.length} serviços detectados (${added.join(", ")})`, "info");
+          await addLog(`Home: +${added.length} serviços detectados (${added.map(n => shortName(n, 18)).join(", ")})`, "info");
         } else {
           await addLog("Home: Nenhum serviço novo detectado.", "info");
         }
@@ -228,7 +246,7 @@ async function performCheckAllServices() {
       const threshold = sanitizeThreshold(service.threshold);
 
       try {
-        await addLog(`Checando ${service.name}...`);
+        await addLog(`Checando ${shortName(service.name)}...`);
         workerTabId = await ensureWorkerTabAlive(workerTabId);
         const result = await withTimeout(scrapeServiceWithRetry(workerTabId, service.slug, config.source_site, abortSignal), 25000);
         const isOutage = result.current >= threshold;
@@ -236,7 +254,8 @@ async function performCheckAllServices() {
         // Se for da home e não atingiu o limiar de reports, remove do statusMap para não exibir no popup
         if (service.isTrending && result.current < threshold) {
           delete statusMap[service.slug];
-          await addLog(`${service.name}: ${result.current} (Limiar ${threshold})`, "success");
+          const sourceTag = result.source ? ` [${result.source}]` : "";
+          await addLog(`${shortName(service.name)}: ${result.current} (Limiar ${threshold})${sourceTag}`, "success");
           // Se havia alerta ativo para este serviço, notifica recovery e limpa o badge
           if (alertedSet.has(service.slug)) {
             sendNotification(service.name, service.slug, result.current, threshold, "recovery");
@@ -273,7 +292,8 @@ async function performCheckAllServices() {
           ts: Date.now()
         };
 
-        await addLog(`${service.name}: ${result.current}/${threshold}`, isOutage ? "error" : "success");
+        const sourceTag = result.source ? ` [${result.source}]` : "";
+        await addLog(`${shortName(service.name)}: ${result.current}/${threshold}${sourceTag}`, isOutage ? "error" : "success");
 
         if (isOutage) {
           if (!alertedSet.has(service.slug)) {

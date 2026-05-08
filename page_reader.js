@@ -1,484 +1,531 @@
+// Script injetado em páginas do Downdetector via chrome.scripting.executeScript
+// (MAIN world). Lê tudo que o background.js precisa: histórico (em 3 fontes,
+// em ordem de preferência), pico declarado, ícones, lista de trending na home,
+// e flags de Cloudflare.
+//
+// Fontes de histórico, da mais precisa pra menos:
+//   1. reactChartData    — array exato no estado React do componente
+//   2. reportPayload     — JSON da API capturado por capture.js (fetch/XHR)
+//   3. svgHistory        — reconstruído amostrando o path SVG (fallback)
+
 (() => {
-      const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+  // ============================================================
+  // Helpers genéricos
+  // ============================================================
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-      const isVisibleColor = value => {
-        if (!value) return false;
-        const normalized = String(value).trim().toLowerCase();
-        return normalized !== "none" &&
-          normalized !== "transparent" &&
-          normalized !== "rgba(0, 0, 0, 0)" &&
-          normalized !== "rgba(0,0,0,0)";
-      };
+  const isVisibleColor = value => {
+    if (!value) return false;
+    const normalized = String(value).trim().toLowerCase();
+    return normalized !== "none" &&
+      normalized !== "transparent" &&
+      normalized !== "rgba(0, 0, 0, 0)" &&
+      normalized !== "rgba(0,0,0,0)";
+  };
 
-      const interpolateBuckets = buckets => {
-        const filled = [...buckets];
+  const interpolateBuckets = buckets => {
+    const filled = [...buckets];
+    let lastKnown = -1;
+    for (let index = 0; index < filled.length; index += 1) {
+      if (Number.isFinite(filled[index])) {
+        lastKnown = index;
+        continue;
+      }
 
-        let lastKnown = -1;
-        for (let index = 0; index < filled.length; index += 1) {
-          if (Number.isFinite(filled[index])) {
-            lastKnown = index;
-            continue;
-          }
+      let nextKnown = index + 1;
+      while (nextKnown < filled.length && !Number.isFinite(filled[nextKnown])) {
+        nextKnown += 1;
+      }
 
-          let nextKnown = index + 1;
-          while (nextKnown < filled.length && !Number.isFinite(filled[nextKnown])) {
-            nextKnown += 1;
-          }
+      if (lastKnown === -1 && nextKnown < filled.length) {
+        filled[index] = filled[nextKnown];
+      } else if (nextKnown >= filled.length && lastKnown !== -1) {
+        filled[index] = filled[lastKnown];
+      } else if (lastKnown !== -1 && nextKnown < filled.length) {
+        const ratio = (index - lastKnown) / (nextKnown - lastKnown);
+        filled[index] = filled[lastKnown] + ((filled[nextKnown] - filled[lastKnown]) * ratio);
+      }
+    }
+    return filled.map(value => Number.isFinite(value) ? value : null);
+  };
 
-          if (lastKnown === -1 && nextKnown < filled.length) {
-            filled[index] = filled[nextKnown];
-            continue;
-          }
+  // ============================================================
+  // Contexto da página
+  // ============================================================
+  const isHomePage = location.pathname === "/" || location.pathname === "/index.html";
 
-          if (nextKnown >= filled.length && lastKnown !== -1) {
-            filled[index] = filled[lastKnown];
-            continue;
-          }
+  const detectCloudflareBlock = () => {
+    const hasElements = Boolean(
+      document.getElementById("challenge-stage") ||
+      document.getElementById("cf-please-wait") ||
+      document.querySelector(".cf-turnstile") ||
+      document.getElementById("cf-spin") ||
+      document.getElementById("cf-wrapper")
+    );
+    if (hasElements) return true;
+    const bodyText = document.body?.innerText || "";
+    return ["Um momento...", "Verify you are human", "Checking your browser", "Executando verificação de segurança"]
+      .some(t => bodyText.includes(t));
+  };
 
-          if (lastKnown !== -1 && nextKnown < filled.length) {
-            const ratio = (index - lastKnown) / (nextKnown - lastKnown);
-            filled[index] = filled[lastKnown] + ((filled[nextKnown] - filled[lastKnown]) * ratio);
-          }
-        }
+  const extractPeriodLabel = () => {
+    const candidates = [
+      ...Array.from(document.querySelectorAll("[aria-label]")).map(el => el.getAttribute("aria-label") || ""),
+      ...Array.from(document.querySelectorAll("h1, h2, h3")).map(el => el.textContent || ""),
+      document.title || ""
+    ];
+    for (const c of candidates) {
+      const m = String(c).match(/(?:últimas?|ultimas?|last|past)\s+(\d+)\s*(?:horas?|hours?)/i);
+      if (m) return `${m[1]}h`;
+    }
+    return "24h";
+  };
 
-        return filled.map(value => Number.isFinite(value) ? value : null);
-      };
+  // ============================================================
+  // Pico declarado pela página (aria-label / tooltip estático)
+  // — fonte autoritativa, usada para calibrar o eixo Y do SVG.
+  // ============================================================
+  const detectDeclaredPeak = () => {
+    // Aria-label do gráfico: "...com um pico de N reportes..."
+    for (const el of document.querySelectorAll("[aria-label]")) {
+      const label = el.getAttribute("aria-label") || "";
+      const m = label.match(/(?:pico de|peak of)\s+([\d.,]+)/i);
+      if (m) {
+        const n = parseInt(m[1].replace(/[^\d]/g, ""), 10);
+        if (Number.isFinite(n)) return n;
+      }
+    }
 
-      const extractPeriodLabel = () => {
-        const candidates = [
-          ...Array.from(document.querySelectorAll("[aria-label]")).map(element => element.getAttribute("aria-label") || ""),
-          ...Array.from(document.querySelectorAll("h1, h2, h3")).map(element => element.textContent || ""),
-          document.title || ""
-        ];
+    // Tooltip estático do Recharts (fallback)
+    const tooltip = document.querySelector(".recharts-tooltip-item-value, .recharts-default-tooltip");
+    if (tooltip) {
+      const m = (tooltip.innerText || "").match(/(\d+)/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n)) return n;
+      }
+    }
 
-        for (const candidate of candidates) {
-          const match = String(candidate).match(/(?:últimas?|ultimas?|last|past)\s+(\d+)\s*(?:horas?|hours?)/i);
-          if (match) {
-            return `${match[1]}h`;
-          }
-        }
+    // Texto bruto na página (último fallback)
+    const bodyText = document.body?.innerText || "";
+    const m = bodyText.match(/(?:pico de|peak of)\s+([\d.,]+)\s+(?:reportes|reports)/i);
+    if (m) {
+      const n = parseInt(m[1].replace(/[^\d]/g, ""), 10);
+      if (Number.isFinite(n)) return n;
+    }
 
-        return "24h";
-      };
+    return null;
+  };
 
-      const extractSvgChart = peakValue => {
-        const svgCandidates = Array.from(document.querySelectorAll("svg"))
-          .map(svg => {
-            const viewBox = svg.viewBox?.baseVal;
-            const bounds = svg.getBoundingClientRect();
-            const width = Number.isFinite(viewBox?.width) && viewBox.width > 0 ? viewBox.width : bounds.width;
-            const height = Number.isFinite(viewBox?.height) && viewBox.height > 0 ? viewBox.height : bounds.height;
-            return { svg, width, height };
-          })
-          .filter(candidate => candidate.width >= 300 && candidate.height >= 120);
+  // ============================================================
+  // Override de animações do Recharts
+  // — necessário para o SVG estabilizar a tempo da extração.
+  // ============================================================
+  const disableRechartsAnimations = () => {
+    const style = document.createElement("style");
+    style.textContent = `
+      .recharts-curve, .recharts-area-area, .recharts-rectangle, .recharts-bar-rectangle, .recharts-area {
+        transition: none !important;
+        animation: none !important;
+        animation-duration: 0s !important;
+        transition-duration: 0s !important;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  };
 
-        let best = null;
+  // ============================================================
+  // Fonte #1: React fiber → prop `chartData`
+  // Array<{ timestamp, value, baseline }> — exato.
+  // ============================================================
+  const extractReactChartData = () => {
+    const roots = [
+      document.querySelector('[data-testid="card-company-status"]'),
+      document.querySelector('[data-testid="card"]'),
+      document.querySelector("main"),
+      document.body
+    ].filter(Boolean);
 
-        for (const candidate of svgCandidates) {
-          const plotRect = Array.from(candidate.svg.querySelectorAll("rect"))
-            .map(rect => ({
-              x: parseFloat(rect.getAttribute("x") || "0"),
-              y: parseFloat(rect.getAttribute("y") || "0"),
-              width: parseFloat(rect.getAttribute("width") || "0"),
-              height: parseFloat(rect.getAttribute("height") || "0")
-            }))
-            .filter(rect => rect.width >= candidate.width * 0.45 && rect.height >= candidate.height * 0.4)
-            .sort((left, right) => (right.width * right.height) - (left.width * left.height))[0] || null;
-
-          for (const path of candidate.svg.querySelectorAll("path")) {
-            try {
-              const bbox = path.getBBox();
-              const length = path.getTotalLength();
-              const style = getComputedStyle(path);
-              const stroke = path.getAttribute("stroke") || style.stroke;
-              const fill = path.getAttribute("fill") || style.fill;
-              const dashArray = path.getAttribute("stroke-dasharray") || style.strokeDasharray;
-              const hasStroke = isVisibleColor(stroke);
-              const hasFill = isVisibleColor(fill);
-              const isDashed = Boolean(dashArray && dashArray !== "none" && dashArray !== "0px");
-
-              if (!Number.isFinite(length) || length < candidate.width * 0.4) continue;
-              if (!Number.isFinite(bbox.width) || bbox.width < candidate.width * 0.35) continue;
-              if (!Number.isFinite(bbox.height)) continue;
-              if (bbox.height < 8 && isDashed) continue;
-
-              let score = (bbox.width * 2) + length + (bbox.height * 4);
-              if (hasStroke) score += 500;
-              if (!hasFill) score += 120;
-              if (hasFill && !hasStroke) score -= 160;
-              if (isDashed) score -= 180;
-
-              if (plotRect) {
-                const withinPlot =
-                  bbox.x >= plotRect.x - 20 &&
-                  bbox.y >= plotRect.y - 30 &&
-                  (bbox.x + bbox.width) <= (plotRect.x + plotRect.width + 20) &&
-                  (bbox.y + bbox.height) <= (plotRect.y + plotRect.height + 30);
-                if (withinPlot) score += 80;
-              }
-
-              if (!best || score > best.score) {
-                best = {
-                  ...candidate,
-                  path,
-                  bbox,
-                  plotRect,
-                  score
-                };
-              }
-            } catch (_error) {}
-          }
-        }
-
-        if (!best) return null;
-
-        const plotLeft = best.plotRect?.x ?? best.bbox.x;
-        const plotTop = best.plotRect?.y ?? Math.max(0, best.bbox.y - 4);
-        const plotWidth = best.plotRect?.width ?? best.bbox.width;
-        const plotHeight = best.plotRect?.height ?? Math.max(best.bbox.height, best.height - plotTop);
-        const textItems = Array.from(best.svg.querySelectorAll("text"))
-          .map(node => {
-            const text = (node.textContent || "").trim();
-            if (!text) return null;
-
-            let x = parseFloat(node.getAttribute("x") || "NaN");
-            let y = parseFloat(node.getAttribute("y") || "NaN");
-
-            try {
-              const bbox = node.getBBox();
-              if (!Number.isFinite(x)) x = bbox.x + (bbox.width / 2);
-              if (!Number.isFinite(y)) y = bbox.y + (bbox.height / 2);
-              return { text, x, y };
-            } catch (_error) {
-              if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-              return { text, x, y };
-            }
-          })
-          .filter(Boolean);
-
-        const yAxisLabels = textItems
-          .filter(item =>
-            /^-?\d+(?:[.,]\d+)?$/.test(item.text) &&
-            item.x <= plotLeft + 28 &&
-            item.y >= plotTop - 12 &&
-            item.y <= plotTop + plotHeight + 12
-          )
-          .map(item => Number(item.text.replace(",", ".")))
-          .filter(Number.isFinite);
-
-        const yAxisMax = Math.max(...yAxisLabels, Number.isFinite(peakValue) ? peakValue : 0, 100);
-
-        const buildSeriesFromPath = path => {
-          const pathLength = path.getTotalLength();
-          const sampleBuckets = new Array(96).fill(null);
-          const samples = 720;
-
-          for (let index = 0; index <= samples; index += 1) {
-            const point = path.getPointAtLength((pathLength * index) / samples);
-            const normalizedX = clamp((point.x - plotLeft) / Math.max(plotWidth, 1), 0, 1);
-            const bucketIndex = clamp(Math.round(normalizedX * (sampleBuckets.length - 1)), 0, sampleBuckets.length - 1);
-
-            if (!Number.isFinite(sampleBuckets[bucketIndex]) || point.y < sampleBuckets[bucketIndex]) {
-              sampleBuckets[bucketIndex] = point.y;
-            }
-          }
-
-          const yValues = interpolateBuckets(sampleBuckets);
-          if (yValues.filter(Number.isFinite).length < 24) return [];
-
-          return yValues.map(value => {
-            if (!Number.isFinite(value)) return null;
-            const relative = clamp((plotTop + plotHeight - value) / Math.max(plotHeight, 1), 0, 1);
-            return Math.max(0, Math.round(relative * yAxisMax));
-          });
-        };
-
-        const baselinePath = Array.from(best.svg.querySelectorAll("path"))
-          .filter(path => {
-            try {
-              if (path === best.path) return false;
-
-              const bbox = path.getBBox();
-              const style = getComputedStyle(path);
-              const dashArray = path.getAttribute("stroke-dasharray") || style.strokeDasharray;
-              const stroke = path.getAttribute("stroke") || style.stroke;
-              const fill = path.getAttribute("fill") || style.fill;
-
-              return Boolean(dashArray && dashArray !== "none" && dashArray !== "0px") &&
-                isVisibleColor(stroke) &&
-                !isVisibleColor(fill) &&
-                Number.isFinite(bbox.width) &&
-                bbox.width >= plotWidth * 0.35;
-            } catch (_error) {
-              return false;
-            }
-          })
-          .sort((left, right) => {
-            try {
-              return right.getBBox().width - left.getBBox().width;
-            } catch (_error) {
-              return 0;
-            }
-          })[0] || null;
-
-        const values = buildSeriesFromPath(best.path);
-        if (values.length < 24) return null;
-
-        const baselineValues = baselinePath ? buildSeriesFromPath(baselinePath) : [];
-        const now = Date.now();
-        const interval = (24 * 60 * 60 * 1000) / Math.max(values.length - 1, 1);
-        const tickLabels = textItems
-          .filter(item =>
-            /^(?:\d{1,2}(?::\d{2})?\s?(?:AM|PM)|\d{1,2}:\d{2})$/i.test(item.text) &&
-            item.x >= plotLeft - 8 &&
-            item.x <= plotLeft + plotWidth + 8 &&
-            item.y >= plotTop + plotHeight - 18
-          )
-          .sort((left, right) => left.x - right.x)
-          .map(item => item.text)
-          .filter((label, index, array) => array.indexOf(label) === index);
-
-        return {
-          history: values.map((value, index) => {
-            const point = {
-              value,
-              timestamp: new Date(now - ((values.length - 1 - index) * interval)).toISOString()
-            };
-
-            const baseline = baselineValues[index];
-            if (Number.isFinite(baseline)) {
-              point.baseline = baseline;
-            }
-
-            return point;
-          }),
-          tickLabels,
-          yAxisMax,
-          periodLabel: extractPeriodLabel()
-        };
-      };
-
-      // Desabilita animações do Recharts para leitura instantânea
-      const style = document.createElement('style');
-      style.textContent = `
-        .recharts-curve, .recharts-area-area, .recharts-rectangle, .recharts-bar-rectangle, .recharts-area {
-          transition: none !important;
-          animation: none !important;
-          animation-duration: 0s !important;
-          transition-duration: 0s !important;
-        }
-      `;
-      (document.head || document.documentElement).appendChild(style);
-
-      const bodyText = document.body?.innerText || "";
-      const hasCloudflareElements = Boolean(
-        document.getElementById("challenge-stage") ||
-        document.getElementById("cf-please-wait") ||
-        document.querySelector(".cf-turnstile") ||
-        document.getElementById("cf-spin") ||
-        document.getElementById("cf-wrapper")
+    for (const el of roots) {
+      const fiberKey = Object.keys(el).find(k =>
+        k.startsWith("__reactFiber") || k.startsWith("__reactInternalInstance")
       );
+      if (!fiberKey) continue;
 
-      const cloudflareBlocked = hasCloudflareElements || [
-        "Um momento...",
-        "Verify you are human",
-        "Checking your browser",
-        "Executando verificação de segurança"
-      ].some(text => bodyText.includes(text));
-
-      const resourceUrls = performance.getEntriesByType("resource")
-        .map(entry => entry.name)
-        .filter(Boolean);
-
-      let reportUrl = resourceUrls.find(url =>
-        /^https:\/\/data-api\.downdetector\.com\/v1\/companies\/\d+\/report\?/i.test(url)
-      ) || null;
-
-      if (!reportUrl) {
-        for (const script of document.scripts) {
-          const text = script.textContent || "";
-          const match = text.match(/https:\/\/data-api\.downdetector\.com\/v1\/companies\/\d+\/report\?[^"'`\s)]+/i);
-          if (match) {
-            reportUrl = match[0].replace(/\\u0026/g, "&");
-            break;
-          }
+      const visited = new WeakSet();
+      const search = (node, depth) => {
+        if (!node || depth > 200) return null;
+        if (typeof node === "object") {
+          if (visited.has(node)) return null;
+          visited.add(node);
         }
-      }
-
-      let peak = null;
-      for (const element of document.querySelectorAll("[aria-label]")) {
-        const label = element.getAttribute("aria-label") || "";
-        const match = label.match(/(?:pico de|peak of)\s+([\d.,]+)/i);
-        if (match) {
-          const numeric = parseInt(match[1].replace(/[^\d]/g, ""), 10);
-          if (Number.isFinite(numeric)) {
-            peak = Math.max(peak ?? 0, numeric);
-          }
-        }
-      }
-
-      if (!Number.isFinite(peak)) {
-        const peakMatch = bodyText.match(/(?:pico de|peak of)\s+([\d.,]+)\s+(?:reportes|reports)/i);
-        if (peakMatch) {
-          const numeric = parseInt(peakMatch[1].replace(/[^\d]/g, ""), 10);
-          if (Number.isFinite(numeric)) peak = numeric;
-        }
-      }
-
-      const extractPeakFromElements = () => {
         try {
-          // Opção 2: Busca em tooltips do Recharts
-          const tooltipValue = document.querySelector(".recharts-tooltip-item-value, .recharts-default-tooltip");
-          if (tooltipValue) {
-             const text = tooltipValue.innerText;
-             const match = text.match(/(\d+)/);
-             if (match) return parseInt(match[1], 10);
+          const props = node.memoizedProps || node.pendingProps;
+          if (props && typeof props === "object" && !Array.isArray(props)) {
+            const cd = props.chartData;
+            if (Array.isArray(cd) && cd.length >= 12 && cd[0] && Number.isFinite(cd[0].value)) {
+              return cd;
+            }
           }
-
-          // Opção 1: Busca no aria-label (específico para o formato do Downdetector)
-          const ariaLabel = document.querySelector("[aria-label*='reportes'], [aria-label*='reports']");
-          if (ariaLabel) {
-             const text = ariaLabel.getAttribute("aria-label");
-             const peakMatch = text.match(/(?:pico de|peak of)\s+([\d.,]+)/i) || text.match(/([\d.,]+)\s+reportes/i);
-             if (peakMatch) return parseInt(peakMatch[1].replace(/[^\d]/g, ""), 10);
+        } catch (_e) {}
+        try {
+          if (node.child) {
+            const found = search(node.child, depth + 1);
+            if (found) return found;
           }
-
-          return null;
-        } catch { return null; }
+          if (node.sibling) {
+            const found = search(node.sibling, depth + 1);
+            if (found) return found;
+          }
+        } catch (_e) {}
+        return null;
       };
 
-      const peakFromElements = extractPeakFromElements();
-      const capture = window.__DDMONITOR_CAPTURE__?.lastReport || null;
-      const capturedUrl = capture?.url || null;
-      if (!reportUrl && capturedUrl) reportUrl = capturedUrl;
-      
-      // Usamos o pico real para calibrar a escala do gráfico SVG
-      const svgChart = extractSvgChart(peakFromElements ?? peak);
+      const found = search(el[fiberKey], 0);
+      if (found) return found;
+    }
+    return null;
+  };
 
-      if (peakFromElements !== null && svgChart?.history?.length > 0) {
-        const historyValues = svgChart.history.map(p => p.value).filter(Number.isFinite);
-        const currentMax = Math.max(...historyValues, 0);
+  // ============================================================
+  // Fonte #2: URL e payload da API (data-api.downdetector.com)
+  // — capturados por capture.js quando a página chama fetch/XHR.
+  // ============================================================
+  const findReportApiUrl = () => {
+    const apiPattern = /^https:\/\/data-api\.downdetector\.com\/v1\/companies\/\d+\/report\?/i;
 
-        // Só reescala se o gráfico já tem magnitude próxima do pico real.
-        // Evita amplificar ruído de SVG (ex: pico 1500, max do SVG 3 → fator 500x distorce tudo).
-        if (currentMax >= peakFromElements * 0.5) {
-          const scaleFactor = peakFromElements / currentMax;
-          svgChart.history.forEach(point => {
-            if (Number.isFinite(point.value)) {
-              point.value = Math.round(point.value * scaleFactor);
-            }
-          });
+    const fromResources = performance.getEntriesByType("resource")
+      .map(e => e.name)
+      .find(url => apiPattern.test(url));
+    if (fromResources) return fromResources;
+
+    for (const script of document.scripts) {
+      const m = (script.textContent || "")
+        .match(/https:\/\/data-api\.downdetector\.com\/v1\/companies\/\d+\/report\?[^"'`\s)]+/i);
+      if (m) return m[0].replace(/\\u0026/g, "&");
+    }
+    return null;
+  };
+
+  // ============================================================
+  // Fonte #3: Reconstrução do SVG (fallback, aproximado)
+  // ============================================================
+  const extractSvgChart = peakValue => {
+    const svgCandidates = Array.from(document.querySelectorAll("svg"))
+      .map(svg => {
+        const vb = svg.viewBox?.baseVal;
+        const r = svg.getBoundingClientRect();
+        const width = Number.isFinite(vb?.width) && vb.width > 0 ? vb.width : r.width;
+        const height = Number.isFinite(vb?.height) && vb.height > 0 ? vb.height : r.height;
+        return { svg, width, height };
+      })
+      .filter(c => c.width >= 300 && c.height >= 120);
+
+    let best = null;
+    for (const candidate of svgCandidates) {
+      const plotRect = Array.from(candidate.svg.querySelectorAll("rect"))
+        .map(rect => ({
+          x: parseFloat(rect.getAttribute("x") || "0"),
+          y: parseFloat(rect.getAttribute("y") || "0"),
+          width: parseFloat(rect.getAttribute("width") || "0"),
+          height: parseFloat(rect.getAttribute("height") || "0")
+        }))
+        .filter(r => r.width >= candidate.width * 0.45 && r.height >= candidate.height * 0.4)
+        .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] || null;
+
+      for (const path of candidate.svg.querySelectorAll("path")) {
+        try {
+          const bbox = path.getBBox();
+          const length = path.getTotalLength();
+          const style = getComputedStyle(path);
+          const stroke = path.getAttribute("stroke") || style.stroke;
+          const fill = path.getAttribute("fill") || style.fill;
+          const dashArray = path.getAttribute("stroke-dasharray") || style.strokeDasharray;
+          const hasStroke = isVisibleColor(stroke);
+          const hasFill = isVisibleColor(fill);
+          const isDashed = Boolean(dashArray && dashArray !== "none" && dashArray !== "0px");
+
+          if (!Number.isFinite(length) || length < candidate.width * 0.4) continue;
+          if (!Number.isFinite(bbox.width) || bbox.width < candidate.width * 0.35) continue;
+          if (!Number.isFinite(bbox.height)) continue;
+          if (bbox.height < 8 && isDashed) continue;
+
+          let score = (bbox.width * 2) + length + (bbox.height * 4);
+          if (hasStroke) score += 500;
+          if (!hasFill) score += 120;
+          // Path com fill e sem stroke costuma ser a ÁREA (preenchimento abaixo
+          // da linha). O path da área é mais comprido — penalidade forte garante
+          // que a linha (stroke + !fill) sempre vença quando ambas existem.
+          if (hasFill && !hasStroke) score -= 800;
+          if (isDashed) score -= 180;
+
+          if (plotRect) {
+            const within =
+              bbox.x >= plotRect.x - 20 &&
+              bbox.y >= plotRect.y - 30 &&
+              (bbox.x + bbox.width) <= (plotRect.x + plotRect.width + 20) &&
+              (bbox.y + bbox.height) <= (plotRect.y + plotRect.height + 30);
+            if (within) score += 80;
+          }
+
+          if (!best || score > best.score) {
+            best = { ...candidate, path, bbox, plotRect, score };
+          }
+        } catch (_e) {}
+      }
+    }
+    if (!best) return null;
+
+    const plotLeft = best.plotRect?.x ?? best.bbox.x;
+    const plotTop = best.plotRect?.y ?? Math.max(0, best.bbox.y - 4);
+    const plotWidth = best.plotRect?.width ?? best.bbox.width;
+    const plotHeight = best.plotRect?.height ?? Math.max(best.bbox.height, best.height - plotTop);
+
+    const textItems = Array.from(best.svg.querySelectorAll("text"))
+      .map(node => {
+        const text = (node.textContent || "").trim();
+        if (!text) return null;
+        let x = parseFloat(node.getAttribute("x") || "NaN");
+        let y = parseFloat(node.getAttribute("y") || "NaN");
+        try {
+          const bb = node.getBBox();
+          if (!Number.isFinite(x)) x = bb.x + (bb.width / 2);
+          if (!Number.isFinite(y)) y = bb.y + (bb.height / 2);
+          return { text, x, y };
+        } catch (_e) {
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+          return { text, x, y };
+        }
+      })
+      .filter(Boolean);
+
+    const yAxisLabels = textItems
+      .filter(item =>
+        /^-?\d+(?:[.,]\d+)?$/.test(item.text) &&
+        item.x <= plotLeft + 28 &&
+        item.y >= plotTop - 12 &&
+        item.y <= plotTop + plotHeight + 12
+      )
+      .map(item => Number(item.text.replace(",", ".")))
+      .filter(Number.isFinite);
+
+    // Quando há labels reais no eixo Y (ex: 0,10,20,30,40), usamos o maior como
+    // autoridade. Se o pico declarado excede o eixo (raro), o pico vira o teto.
+    let yAxisMax;
+    if (yAxisLabels.length >= 2) {
+      yAxisMax = Math.max(...yAxisLabels);
+      if (Number.isFinite(peakValue) && peakValue > yAxisMax) yAxisMax = peakValue;
+    } else if (Number.isFinite(peakValue) && peakValue > 0) {
+      yAxisMax = peakValue;
+    } else {
+      yAxisMax = 100;
+    }
+
+    const buildSeriesFromPath = path => {
+      const pathLength = path.getTotalLength();
+      const buckets = new Array(96).fill(null);
+      const samples = 720;
+      for (let i = 0; i <= samples; i += 1) {
+        const pt = path.getPointAtLength((pathLength * i) / samples);
+        const nx = clamp((pt.x - plotLeft) / Math.max(plotWidth, 1), 0, 1);
+        const bi = clamp(Math.round(nx * (buckets.length - 1)), 0, buckets.length - 1);
+        if (!Number.isFinite(buckets[bi]) || pt.y < buckets[bi]) buckets[bi] = pt.y;
+      }
+      const yVals = interpolateBuckets(buckets);
+      if (yVals.filter(Number.isFinite).length < 24) return [];
+      return yVals.map(v => {
+        if (!Number.isFinite(v)) return null;
+        const rel = clamp((plotTop + plotHeight - v) / Math.max(plotHeight, 1), 0, 1);
+        return Math.max(0, Math.round(rel * yAxisMax));
+      });
+    };
+
+    const baselinePath = Array.from(best.svg.querySelectorAll("path"))
+      .filter(p => {
+        try {
+          if (p === best.path) return false;
+          const bb = p.getBBox();
+          const cs = getComputedStyle(p);
+          const dash = p.getAttribute("stroke-dasharray") || cs.strokeDasharray;
+          const stroke = p.getAttribute("stroke") || cs.stroke;
+          const fill = p.getAttribute("fill") || cs.fill;
+          return Boolean(dash && dash !== "none" && dash !== "0px") &&
+            isVisibleColor(stroke) && !isVisibleColor(fill) &&
+            Number.isFinite(bb.width) && bb.width >= plotWidth * 0.35;
+        } catch (_e) { return false; }
+      })
+      .sort((a, b) => {
+        try { return b.getBBox().width - a.getBBox().width; }
+        catch (_e) { return 0; }
+      })[0] || null;
+
+    const values = buildSeriesFromPath(best.path);
+    if (values.length < 24) return null;
+
+    const baselineValues = baselinePath ? buildSeriesFromPath(baselinePath) : [];
+    const now = Date.now();
+    const interval = (24 * 60 * 60 * 1000) / Math.max(values.length - 1, 1);
+
+    const tickLabels = textItems
+      .filter(item =>
+        /^(?:\d{1,2}(?::\d{2})?\s?(?:AM|PM)|\d{1,2}:\d{2})$/i.test(item.text) &&
+        item.x >= plotLeft - 8 &&
+        item.x <= plotLeft + plotWidth + 8 &&
+        item.y >= plotTop + plotHeight - 18
+      )
+      .sort((a, b) => a.x - b.x)
+      .map(item => item.text)
+      .filter((label, i, arr) => arr.indexOf(label) === i);
+
+    return {
+      history: values.map((value, i) => {
+        const point = {
+          value,
+          timestamp: new Date(now - ((values.length - 1 - i) * interval)).toISOString()
+        };
+        const baseline = baselineValues[i];
+        if (Number.isFinite(baseline)) point.baseline = baseline;
+        return point;
+      }),
+      tickLabels,
+      yAxisMax,
+      periodLabel: extractPeriodLabel()
+    };
+  };
+
+  // Calibra a história do SVG quando temos o pico declarado.
+  // Evita amplificar ruído puro (ex: pico 1500 vs SVG max 3 → fator 500x).
+  const calibrateSvgWithPeak = (svgChart, declaredPeak) => {
+    if (declaredPeak === null || !svgChart?.history?.length) return;
+    const max = Math.max(...svgChart.history.map(p => p.value).filter(Number.isFinite), 0);
+    if (max < declaredPeak * 0.05) return;
+    const factor = declaredPeak / max;
+    svgChart.history.forEach(p => {
+      if (Number.isFinite(p.value)) p.value = Math.round(p.value * factor);
+    });
+  };
+
+  // ============================================================
+  // Logos / favicons
+  // ============================================================
+
+  // Logos vêm via Cloudflare image resizing
+  // (ex: cdn3.../cdn-cgi/image/width=750/cdn2.../static/uploads/logo/<hash>.png).
+  // Trocamos por width=64 — suficiente para o ícone 18x18 do popup, retina-ready.
+  const downsizeLogoUrl = url => {
+    if (!url || !url.startsWith("http")) return null;
+    if (url.includes("/cdn-cgi/image/")) {
+      return url.replace(/\/cdn-cgi\/image\/[^/]+/, "/cdn-cgi/image/width=64");
+    }
+    return url;
+  };
+
+  const extractTrendingIconUrl = item => {
+    const img = item.querySelector("img");
+    if (!img) return null;
+    return downsizeLogoUrl(img.getAttribute("src") || img.src || null);
+  };
+
+  // Na página de detalhe, o logo principal tem "/static/uploads/logo/" no src e
+  // fica dentro de um <a> que aponta pro domínio oficial. Preferimos favicon
+  // (sempre quadrado) sobre o logo wide do Downdetector. Devolvemos uma lista
+  // em ordem de preferência para o popup tentar uma a uma.
+  const extractServiceIconUrls = () => {
+    let officialDomain = null;
+    let fallbackLogo = null;
+
+    for (const img of document.querySelectorAll("img")) {
+      const src = img.getAttribute("src") || img.src || "";
+      const srcset = img.getAttribute("srcset") || "";
+      const hasLogo = src.includes("/static/uploads/logo/") || srcset.includes("/static/uploads/logo/");
+      if (!hasLogo) continue;
+
+      if (!fallbackLogo) {
+        if (src.includes("/static/uploads/logo/")) {
+          fallbackLogo = downsizeLogoUrl(src);
+        } else {
+          const m = srcset.match(/(https?:\/\/\S+)/);
+          if (m) fallbackLogo = downsizeLogoUrl(m[1]);
         }
       }
 
-      // Os logos do Downdetector vêm via Cloudflare image resizing
-      // (ex: cdn3.../cdn-cgi/image/width=750/cdn2.../static/uploads/logo/<hash>.png).
-      // Trocamos por width=64 — suficiente para o ícone 18x18 do popup, inclusive em retina.
-      const downsizeLogoUrl = url => {
-        if (!url || !url.startsWith("http")) return null;
-        if (url.includes("/cdn-cgi/image/")) {
-          return url.replace(/\/cdn-cgi\/image\/[^/]+/, "/cdn-cgi/image/width=64");
-        }
-        return url;
-      };
-
-      const extractIconUrl = item => {
-        const img = item.querySelector("img");
-        if (!img) return null;
-        return downsizeLogoUrl(img.getAttribute("src") || img.src || null);
-      };
-
-      // Na página de detalhe de um serviço, o logo principal sempre tem
-      // "/static/uploads/logo/" no src e fica dentro de um <a> que aponta pro
-      // domínio oficial (ex: vivo.com.br). Retornamos uma lista de URLs em
-      // ordem de preferência para que o popup tente uma a uma (chain de fallback).
-      const extractServiceIconUrls = () => {
-        let officialDomain = null;
-        let fallbackLogo = null;
-
-        for (const img of document.querySelectorAll("img")) {
-          const src = img.getAttribute("src") || img.src || "";
-          const srcset = img.getAttribute("srcset") || "";
-          const hasLogoPath = src.includes("/static/uploads/logo/") ||
-            srcset.includes("/static/uploads/logo/");
-          if (!hasLogoPath) continue;
-
-          if (!fallbackLogo) {
-            if (src.includes("/static/uploads/logo/")) {
-              fallbackLogo = downsizeLogoUrl(src);
-            } else {
-              const first = srcset.match(/(https?:\/\/\S+)/);
-              if (first) fallbackLogo = downsizeLogoUrl(first[1]);
+      if (!officialDomain) {
+        const anchor = img.closest("a[href^='http']");
+        if (anchor) {
+          try {
+            const linkUrl = new URL(anchor.getAttribute("href") || "");
+            if (linkUrl.hostname && !linkUrl.hostname.includes("downdetector.")) {
+              // Remove "www." — favicon services indexam pelo domínio raiz.
+              officialDomain = linkUrl.hostname.replace(/^www\./i, "");
             }
-          }
-
-          if (!officialDomain) {
-            const anchor = img.closest("a[href^='http']");
-            if (anchor) {
-              try {
-                const linkUrl = new URL(anchor.getAttribute("href") || "");
-                if (linkUrl.hostname && !linkUrl.hostname.includes("downdetector.")) {
-                  // Remove "www." — serviços de favicon geralmente indexam pelo
-                  // domínio raiz (ex: whatsapp.com, não www.whatsapp.com).
-                  officialDomain = linkUrl.hostname.replace(/^www\./i, "");
-                }
-              } catch (_error) {}
-            }
-          }
-
-          if (officialDomain && fallbackLogo) break;
+          } catch (_e) {}
         }
+      }
+      if (officialDomain && fallbackLogo) break;
+    }
 
-        const urls = [];
-        if (officialDomain) {
-          // DuckDuckGo: devolve 404 quando não tem (deixa o onerror disparar).
-          urls.push(`https://icons.duckduckgo.com/ip3/${officialDomain}.ico`);
-          // Google: ampla cobertura, mas pode servir placeholder genérico (200 OK).
-          urls.push(`https://www.google.com/s2/favicons?domain=${officialDomain}&sz=64`);
-        }
-        if (fallbackLogo) urls.push(fallbackLogo);
-        return urls;
-      };
+    const urls = [];
+    if (officialDomain) {
+      // DuckDuckGo retorna 404 quando não tem (deixa onerror disparar no popup).
+      urls.push(`https://icons.duckduckgo.com/ip3/${officialDomain}.ico`);
+      // Google tem ampla cobertura, mas pode servir placeholder genérico (200 OK).
+      urls.push(`https://www.google.com/s2/favicons?domain=${officialDomain}&sz=64`);
+    }
+    if (fallbackLogo) urls.push(fallbackLogo);
+    return urls;
+  };
 
-      const extractTrendingServices = () => {
-        const services = [];
-        // Seleciona os cards de serviços que geralmente estão no grid da home
-        const items = document.querySelectorAll("a[href*='/status/'], a[href*='/fora-do-ar/']");
+  // ============================================================
+  // Lista de serviços em alta (home)
+  // ============================================================
+  const extractTrendingServices = () => {
+    const services = [];
+    const items = document.querySelectorAll("a[href*='/status/'], a[href*='/fora-do-ar/']");
 
-        for (const item of items) {
-          const href = item.getAttribute("href");
-          const slugMatch = href.match(/\/(?:status|fora-do-ar)\/([^/]+)\/?$/);
-          if (!slugMatch) continue;
+    for (const item of items) {
+      const href = item.getAttribute("href");
+      const slugMatch = href.match(/\/(?:status|fora-do-ar)\/([^/]+)\/?$/);
+      if (!slugMatch) continue;
 
-          const slug = slugMatch[1];
-          if (slug === "fora-do-ar" || slug === "status") continue;
-          if (services.find(s => s.slug === slug)) continue;
+      const slug = slugMatch[1];
+      if (slug === "fora-do-ar" || slug === "status") continue;
+      if (services.find(s => s.slug === slug)) continue;
 
-          // Tenta pegar o nome da empresa
-          const nameElement = item.querySelector(".company-name, .name, h3, h4, strong") || item;
-          let name = nameElement.textContent.trim().split("\n")[0].trim();
-          if (name.length > 30) name = name.substring(0, 27) + "...";
+      const nameEl = item.querySelector(".company-name, .name, h3, h4, strong") || item;
+      let name = nameEl.textContent.trim().split("\n")[0].trim();
+      if (name.length > 30) name = name.substring(0, 27) + "...";
 
-          // A posição na lista é o único critério relevante — sem filtro por indicadores visuais
-          services.push({ name, slug, iconUrl: extractIconUrl(item) });
-          if (services.length >= 20) break; // Limite de busca (mais do que suficiente para qualquer top_services_count)
-        }
-        return services;
-      };
+      // A posição na lista é o único critério — sem filtro por indicadores visuais.
+      services.push({ name, slug, iconUrl: extractTrendingIconUrl(item) });
+      if (services.length >= 20) break;
+    }
+    return services;
+  };
 
-      const isHomePage = window.location.pathname === "/" || window.location.pathname === "/index.html";
+  // ============================================================
+  // Main: monta o objeto de retorno
+  // ============================================================
+  disableRechartsAnimations();
 
-      return {
-        isHomePage,
-        trendingServices: isHomePage ? extractTrendingServices() : [],
-        serviceIconUrls: isHomePage ? [] : extractServiceIconUrls(),
-        cloudflareBlocked,
-        reportUrl,
-        reportPayload: capture?.payload ?? null,
-        peak: Number.isFinite(peakFromElements) ? peakFromElements : (Number.isFinite(peak) ? peak : null),
-        svgHistory: Array.isArray(svgChart?.history) ? svgChart.history : [],
-        tickLabels: Array.isArray(svgChart?.tickLabels) ? svgChart.tickLabels : [],
-        periodLabel: svgChart?.periodLabel || extractPeriodLabel(),
-        yAxisMax: Number.isFinite(svgChart?.yAxisMax) ? svgChart.yAxisMax : null
-      };
+  const declaredPeak = detectDeclaredPeak();
+  const reportUrl = findReportApiUrl();
+  const capture = window.__DDMONITOR_CAPTURE__?.lastReport || null;
+
+  const svgChart = extractSvgChart(declaredPeak);
+  calibrateSvgWithPeak(svgChart, declaredPeak);
+
+  return {
+    isHomePage,
+    trendingServices: isHomePage ? extractTrendingServices() : [],
+    serviceIconUrls: isHomePage ? [] : extractServiceIconUrls(),
+    reactChartData: isHomePage ? null : extractReactChartData(),
+    cloudflareBlocked: detectCloudflareBlock(),
+    reportUrl: reportUrl || capture?.url || null,
+    reportPayload: capture?.payload || null,
+    peak: declaredPeak,
+    svgHistory: svgChart?.history || [],
+    tickLabels: svgChart?.tickLabels || [],
+    periodLabel: svgChart?.periodLabel || extractPeriodLabel(),
+    yAxisMax: svgChart?.yAxisMax ?? null
+  };
 })();

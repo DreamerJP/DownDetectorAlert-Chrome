@@ -203,7 +203,14 @@ async function waitForPageSignals(tabId, abortSignal) {
           priority: 2
         });
       }
-    } else if (lastSignals?.reportPayload || (Array.isArray(lastSignals?.svgHistory) && lastSignals.svgHistory.length >= 24)) {
+    } else if (
+      lastSignals?.reportPayload ||
+      // Mín 50 pontos: o React costuma popular o array completo de uma vez (96
+      // pontos), mas em alguns SSRs ele aparece parcial (10-30) e completa
+      // em ms. Aceitar parcial fazia o "current" ser um ponto velho do gráfico.
+      (Array.isArray(lastSignals?.reactChartData) && lastSignals.reactChartData.length >= 50) ||
+      (Array.isArray(lastSignals?.svgHistory) && lastSignals.svgHistory.length >= 24)
+    ) {
 
       if (notifiedCloudflare && previousActiveTabId) {
         try {
@@ -236,20 +243,52 @@ function getServiceUrls(slug, sourceSite) {
   ];
 }
 
+// Extrai a história de reportes a partir dos sinais lidos da página, em ordem
+// de preferência. O campo `source` permite o caller saber qual método foi usado
+// (útil para logs e otimizações de timing — react/api não dependem de animação).
 function extractHistoryFromSignals(signals) {
-  const payload = signals?.reportPayload || null;
-  let history = payload ? extractHistoryFromPayload(payload) : [];
-
-  if (!history.length && Array.isArray(signals?.svgHistory) && signals.svgHistory.length >= 24) {
-    history = signals.svgHistory.slice(-96);
+  // 1ª escolha: dados exatos lidos do estado React do componente.
+  // Formato: [{ timestamp: <ms>, value: <int>, baseline: <int> }, ...]
+  // Mín 50 pontos: array parcial faz o "current" virar um ponto velho do gráfico.
+  if (Array.isArray(signals?.reactChartData) && signals.reactChartData.length >= 50) {
+    const history = signals.reactChartData
+      .filter(p => p && Number.isFinite(p.value))
+      .map(p => {
+        const out = { value: Math.max(0, Math.round(p.value)) };
+        if (Number.isFinite(p.timestamp)) {
+          // Aceita tanto Unix seconds quanto Unix ms
+          const ms = p.timestamp > 1e12 ? p.timestamp : p.timestamp * 1000;
+          out.timestamp = new Date(ms).toISOString();
+        }
+        if (Number.isFinite(p.baseline)) {
+          out.baseline = Math.max(0, Math.round(p.baseline));
+        }
+        return out;
+      });
+    if (history.length >= 12) {
+      return { payload: null, history, source: "react" };
+    }
   }
 
-  return { payload, history };
+  // 2ª escolha: payload da API capturado via fetch/XHR
+  const payload = signals?.reportPayload || null;
+  if (payload) {
+    const history = extractHistoryFromPayload(payload);
+    if (history.length) {
+      return { payload, history, source: "api" };
+    }
+  }
+
+  // 3ª escolha: reconstrução do SVG (estimativa, não exato)
+  if (Array.isArray(signals?.svgHistory) && signals.svgHistory.length >= 24) {
+    return { payload, history: signals.svgHistory.slice(-96), source: "svg" };
+  }
+
+  return { payload, history: [], source: null };
 }
 
 async function scrapeService(tabId, slug, sourceSite, abortSignal) {
   const urls = getServiceUrls(slug, sourceSite);
-
   let lastError = null;
 
   for (const url of urls) {
@@ -263,31 +302,38 @@ async function scrapeService(tabId, slug, sourceSite, abortSignal) {
         throw new Error("Cloudflare bloqueou o carregamento da página.");
       }
 
-      // Aguarda as animações de entrada do gráfico (Recharts pode ser lento em algumas máquinas)
-      // Esperamos 3 segundos para garantir que a linha chegou no topo real
-      await delay(3000);
+      // Tenta extrair imediatamente. React (chartData) e API (payload) ficam
+      // disponíveis assim que o componente monta — não dependem de animação.
+      let extracted = extractHistoryFromSignals(signals);
+      let { payload, history, source } = extracted;
 
-      let { payload, history } = extractHistoryFromSignals(signals);
+      // Apenas o método SVG depende da animação Recharts terminar (~2s para
+      // o path se estabilizar). Se a melhor fonte disponível é o SVG (ou
+      // nada), aguardamos e tentamos de novo.
+      if (!history.length || source === "svg") {
+        await delay(2000);
+        signals = await readPageSignals(tabId);
+        extracted = extractHistoryFromSignals(signals);
+        ({ payload, history, source } = extracted);
 
-      if (!history.length) {
-        for (let attempt = 0; attempt < 4 && !history.length; attempt += 1) {
-          await delay(1000);
+        // Tentativas extras se ainda não veio nada (raro, página muito lenta)
+        for (let attempt = 0; attempt < 3 && !history.length; attempt += 1) {
+          await delay(800);
           signals = await readPageSignals(tabId);
-          const extracted = extractHistoryFromSignals(signals);
-          payload = extracted.payload || payload;
-          history = extracted.history;
+          extracted = extractHistoryFromSignals(signals);
+          ({ payload, history, source } = extracted);
         }
       }
 
       if (!history.length) {
-        if (!signals?.reportUrl && !signals?.reportPayload) {
+        if (!signals?.reportUrl && !signals?.reportPayload && !signals?.reactChartData?.length) {
           throw new Error("O gráfico real não apareceu na página.");
         }
         throw new Error("Não consegui transformar o gráfico renderizado em série.");
       }
 
       const current = history[history.length - 1].value;
-      const peak = Math.max(...history.map(point => point.value), signals?.peak ?? 0);
+      const peak = Math.max(...history.map(p => p.value), signals?.peak ?? 0);
       const baselineCurrent = Number.isFinite(history[history.length - 1]?.baseline)
         ? history[history.length - 1].baseline
         : null;
@@ -297,6 +343,7 @@ async function scrapeService(tabId, slug, sourceSite, abortSignal) {
         peak,
         baselineCurrent,
         history,
+        source,
         iconUrls: Array.isArray(signals?.serviceIconUrls) ? signals.serviceIconUrls : [],
         periodLabel: signals?.periodLabel || "24h",
         tickLabels: Array.isArray(signals?.tickLabels) ? signals.tickLabels : []
