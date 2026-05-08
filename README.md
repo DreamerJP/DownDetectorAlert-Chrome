@@ -1,4 +1,4 @@
-# Downdetector Monitor — Extensão Chrome
+# Downdetector Monitor (Extensão Chrome)
 
 Monitora serviços no Downdetector diretamente no Chrome e envia notificação
 quando o número de reportes ultrapassa o limite configurado. Também detecta
