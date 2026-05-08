@@ -58,7 +58,9 @@ Clique numa linha para expandir o gráfico das últimas 24h.
 
 ### Aba Logs
 Mostra o que aconteceu no último ciclo. Os logs são reiniciados a cada
-ciclo (intencional, para ficarem sempre relevantes).
+ciclo (intencional, para ficarem sempre relevantes). Cada serviço
+aparece com a fonte de extração usada entre colchetes: `[react]`,
+`[api]` ou `[svg]` (ver "Como funciona por baixo").
 
 ### Cabeçalho
 - **Botão ON/OFF** (lado esquerdo do ↺): pausa/retoma o monitoramento.
@@ -89,16 +91,35 @@ Exemplos: `youtube`, `netflix`, `tim`, `claro-net-virtua`, `steam`,
 
 A extensão mantém uma aba pinada (chamada "Aba de Serviço") que carrega
 as páginas do Downdetector em segundo plano. Os reportes são extraídos
-de duas fontes, em ordem:
+de **três fontes**, em ordem de preferência (a primeira que funcionar
+é a usada):
 
-1. **Interceptação da API**: um content script captura o JSON da
-   `data-api.downdetector.com` quando a página o requisita.
-2. **Fallback via SVG**: se a API não aparecer, a extensão lê o gráfico
-   renderizado direto do DOM, reconstruindo a série temporal.
+1. **`[react]` — Estado React do componente** (fonte primária)
+   O Downdetector é construído em Next.js/React e mantém o histórico
+   de reportes como prop `chartData` no estado do componente — um array
+   de 96 pontos com timestamp, value e baseline exatos. A extensão lê
+   esse array direto do React fiber. **É a mesma fonte que o servidor
+   enviou pra renderizar o gráfico**, sem perda na reconstrução.
+
+2. **`[api]` — JSON da API** (fonte secundária)
+   Quando a página chama `data-api.downdetector.com/v1/companies/.../report`,
+   um content script intercepta o response via `fetch`/`XHR` patching e
+   guarda o payload. Hoje em dia o Downdetector raramente faz essa
+   chamada (entrega tudo via SSR + estado React), mas o caminho fica
+   ativo como redundância.
+
+3. **`[svg]` — Reconstrução do gráfico SVG** (fallback)
+   Se nem React nem API funcionaram, a extensão amostra o path SVG do
+   gráfico (96 buckets ao longo da largura) e reconstrói a série
+   estimando o eixo Y a partir dos labels visíveis. É aproximado
+   (~95% de precisão) e depende da animação do Recharts ter terminado.
+
+Cada linha de log indica qual fonte foi usada. Em condições normais,
+todas devem ser `[react]`.
 
 A aba worker bloqueia anúncios via `declarativeNetRequest` e fica mutada
 para não atrapalhar. **Não feche essa aba manualmente.** Se fechar, a
-extensão recria automaticamente no próximo ciclo.
+extensão detecta na próxima iteração e recria automaticamente.
 
 Quando o Cloudflare exige verificação humana, a extensão tenta recarregar
 a página silenciosamente uma vez. Se persistir, traz a aba ao foco e
