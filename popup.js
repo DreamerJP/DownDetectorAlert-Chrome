@@ -1,5 +1,13 @@
 let chartGradientCounter = 0;
 
+// Ícones SVG inline para substituir emojis dinâmicos no popup.
+// Cada um herda currentColor — basta colorir o elemento pai.
+const SVG_ICONS = {
+  refresh: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>',
+  warning: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
+  check: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><polyline points="20 6 9 17 4 12"/></svg>'
+};
+
 function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = String(text ?? "");
@@ -422,7 +430,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
       } else {
         btn.style.display = "block";
         btn.disabled = false;
-        btn.textContent = "↻";
+        btn.innerHTML = SVG_ICONS.refresh;
         const spinner = document.getElementById("active-spinner");
         if (spinner) spinner.remove();
       }
@@ -439,15 +447,14 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 document.getElementById("btn-refresh").addEventListener("click", async () => {
   const btn = document.getElementById("btn-refresh");
-  btn.textContent = "⏳";
   btn.disabled = true;
+  // Durante o force check, o storage listener substitui o botão pelo spinner —
+  // mantemos o ícone refresh enquanto o evento isChecking não chega.
   const result = await chrome.runtime.sendMessage({ type: "FORCE_CHECK" });
   await refreshStatus();
-  btn.textContent = result?.ok === false ? "⚠" : "↻";
+  btn.innerHTML = result?.ok === false ? SVG_ICONS.warning : SVG_ICONS.refresh;
   if (result?.ok === false) {
-    setTimeout(() => {
-      btn.textContent = "↻";
-    }, 1500);
+    setTimeout(() => { btn.innerHTML = SVG_ICONS.refresh; }, 1500);
   }
   btn.disabled = false;
 });
@@ -455,25 +462,44 @@ document.getElementById("btn-refresh").addEventListener("click", async () => {
 // ── Config ────────────────────────────────────────────────────────────────────
 let currentServices = [];
 let currentSourceSite = DEFAULT_SOURCE_SITE;
+let isDirty = false;
+let isLoadingConfig = false;
+
+function markDirty() {
+  if (isLoadingConfig) return;
+  isDirty = true;
+  document.getElementById("btn-save")?.classList.add("unsaved");
+}
+
+function clearDirty() {
+  isDirty = false;
+  document.getElementById("btn-save")?.classList.remove("unsaved");
+}
 
 async function loadConfig() {
-  const { config } = await chrome.storage.sync.get("config");
-  if (!config) return;
-  document.getElementById("interval").value = config.interval_minutes;
-  currentSourceSite = config.source_site || DEFAULT_SOURCE_SITE;
-  document.getElementById("source-site").value = currentSourceSite;
-  
-  const topEnabled = config.top_services_enabled === true;
-  document.getElementById("top-enabled").checked = topEnabled;
-  document.getElementById("top-count").value = config.top_services_count || 5;
-  document.getElementById("top-threshold").value = config.top_services_threshold || DEFAULT_TOP_SERVICES_THRESHOLD;
-  document.getElementById("top-count-group").style.display = topEnabled ? "flex" : "none";
+  isLoadingConfig = true;
+  try {
+    const { config } = await chrome.storage.sync.get("config");
+    if (!config) return;
+    document.getElementById("interval").value = config.interval_minutes;
+    currentSourceSite = config.source_site || DEFAULT_SOURCE_SITE;
+    document.getElementById("source-site").value = currentSourceSite;
 
-  currentServices = (config.services || []).map(service => ({
-    ...service,
-    threshold: parseInt(service.threshold) || DEFAULT_THRESHOLD
-  }));
-  renderServiceEditor();
+    const topEnabled = config.top_services_enabled === true;
+    document.getElementById("top-enabled").checked = topEnabled;
+    document.getElementById("top-count").value = config.top_services_count || 5;
+    document.getElementById("top-threshold").value = config.top_services_threshold || DEFAULT_TOP_SERVICES_THRESHOLD;
+    document.getElementById("top-count-group").style.display = topEnabled ? "grid" : "none";
+
+    currentServices = (config.services || []).map(service => ({
+      ...service,
+      threshold: parseInt(service.threshold) || DEFAULT_THRESHOLD
+    }));
+    renderServiceEditor();
+  } finally {
+    isLoadingConfig = false;
+    clearDirty();
+  }
 }
 
 function renderServiceEditor() {
@@ -490,6 +516,7 @@ function renderServiceEditor() {
     btn.addEventListener("click", () => {
       currentServices.splice(parseInt(btn.dataset.remove), 1);
       renderServiceEditor();
+      markDirty();
     });
   });
 
@@ -511,7 +538,22 @@ document.getElementById("btn-add").addEventListener("click", () => {
   document.getElementById("new-name").value = "";
   document.getElementById("new-slug").value = "";
   document.getElementById("new-threshold").value = String(DEFAULT_THRESHOLD);
+  markDirty();
 });
+
+// Marca config como "alterações não salvas" em qualquer input/change dentro da
+// aba Configurar (exceto nos campos do "Adicionar serviço" — só viram dirty
+// quando o user clica em Add, tratado acima).
+(() => {
+  const panel = document.getElementById("panel-config");
+  if (!panel) return;
+  const onMaybeDirty = (e) => {
+    if (e.target?.id?.startsWith("new-")) return;
+    markDirty();
+  };
+  panel.addEventListener("input", onMaybeDirty);
+  panel.addEventListener("change", onMaybeDirty);
+})();
 
 document.getElementById("btn-save").addEventListener("click", async () => {
   const btn = document.getElementById("btn-save");
@@ -524,14 +566,37 @@ document.getElementById("btn-save").addEventListener("click", async () => {
     services: currentServices.filter(s => s.slug)
   };
   await chrome.runtime.sendMessage({ type: "SAVE_CONFIG", config });
-  btn.textContent = "✓ Salvo!";
+  clearDirty();
+  btn.innerHTML = `${SVG_ICONS.check}Salvo!`;
   setTimeout(() => btn.textContent = "Salvar configurações", 1500);
 });
 
 document.getElementById("top-enabled").addEventListener("change", e => {
-  document.getElementById("top-count-group").style.display = e.target.checked ? "flex" : "none";
+  document.getElementById("top-count-group").style.display = e.target.checked ? "grid" : "none";
 });
 
+
+// ── Info Toggle (caixa "Sobre o monitoramento" colapsável) ──────────────────
+(() => {
+  const toggle = document.getElementById("info-toggle");
+  const content = document.getElementById("info-content");
+  if (!toggle || !content) return;
+
+  // Restaura estado salvo (default: colapsado)
+  chrome.storage.local.get("infoExpanded").then(({ infoExpanded }) => {
+    if (infoExpanded === true) {
+      toggle.setAttribute("aria-expanded", "true");
+      content.hidden = false;
+    }
+  });
+
+  toggle.addEventListener("click", () => {
+    const expanded = toggle.getAttribute("aria-expanded") === "true";
+    toggle.setAttribute("aria-expanded", String(!expanded));
+    content.hidden = expanded;
+    chrome.storage.local.set({ infoExpanded: !expanded });
+  });
+})();
 
 // ── Toggle Monitoring ────────────────────────────────────────────────────────
 function applyToggleState(enabled) {
@@ -585,7 +650,7 @@ async function boot() {
     }
   } else {
     btn.style.display = "block";
-    btn.textContent = "↻";
+    btn.innerHTML = SVG_ICONS.refresh;
     const spinner = document.getElementById("active-spinner");
     if (spinner) spinner.remove();
   }
