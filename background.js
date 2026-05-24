@@ -73,8 +73,29 @@ async function scheduleAlarm(triggerStartupDelay = false) {
   }
 }
 
+async function updateExtensionIcon(enabled) {
+  const paths = enabled ? {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  } : {
+    "16": "icons/icon16_gray.png",
+    "48": "icons/icon48_gray.png",
+    "128": "icons/icon128_gray.png"
+  };
+
+  try {
+    await chrome.action.setIcon({ path: paths });
+  } catch (e) {
+    console.error("Falha ao definir o ícone da extensão:", e);
+  }
+}
+
 async function initializeExtension() {
   await ensureConfig();
+  const { monitoringEnabled = true } = await chrome.storage.local.get("monitoringEnabled");
+  await updateExtensionIcon(monitoringEnabled);
+
   // Só agenda o alarme se já houver alguma janela aberta para este perfil
   const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
   if (windows.length > 0) {
@@ -454,6 +475,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.type === "TOGGLE_MONITORING") {
     const enabled = msg.enabled === true;
     chrome.storage.local.set({ monitoringEnabled: enabled }).then(async () => {
+      await updateExtensionIcon(enabled);
       if (enabled) {
         await scheduleAlarm();
       } else {
