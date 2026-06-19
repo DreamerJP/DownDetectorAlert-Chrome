@@ -478,6 +478,29 @@
   // ============================================================
   // Lista de serviços em alta (home)
   // ============================================================
+
+  // Slug → nome legível, usado como fallback quando o aria-label não vier
+  // (ex: "disney-plus" → "Disney Plus").
+  const humanizeSlug = slug => decodeURIComponent(String(slug || ""))
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, c => c.toUpperCase());
+
+  // Na home cada card é um <a href="/fora-do-ar/<slug>/"> sem texto nem <img>
+  // dentro: o nome do serviço fica no aria-label, no formato
+  // "Página de status <Nome>" (.com.br) ou "Status page <Nome>" (.com).
+  // Lemos o aria-label, tiramos esse prefixo e, na falta dele, caímos no slug.
+  const resolveTrendingName = (item, slug) => {
+    const name = (item.getAttribute("aria-label") || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^p[áa]gina de status\s+/i, "")
+      .replace(/^status page\s+/i, "")
+      .trim();
+    return name || humanizeSlug(slug);
+  };
+
   const extractTrendingServices = () => {
     const services = [];
     const items = document.querySelectorAll("a[href*='/status/'], a[href*='/fora-do-ar/']");
@@ -491,8 +514,7 @@
       if (slug === "fora-do-ar" || slug === "status") continue;
       if (services.find(s => s.slug === slug)) continue;
 
-      const nameEl = item.querySelector(".company-name, .name, h3, h4, strong") || item;
-      let name = nameEl.textContent.trim().split("\n")[0].trim();
+      let name = resolveTrendingName(item, slug);
       if (name.length > 30) name = name.substring(0, 27) + "...";
 
       // A posição na lista é o único critério — sem filtro por indicadores visuais.
