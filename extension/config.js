@@ -2,7 +2,7 @@
 // Depende de constants.js + utils.js (sanitizeThreshold, sanitizeSourceSite).
 
 const DEFAULT_CONFIG = {
-  interval_minutes: 10,
+  interval_minutes: DEFAULT_INTERVAL_MINUTES,
   source_site: DEFAULT_SOURCE_SITE,
   top_services_enabled: DEFAULT_TOP_SERVICES_ENABLED,
   top_services_count: DEFAULT_TOP_SERVICES_COUNT,

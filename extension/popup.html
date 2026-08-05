@@ -4,10 +4,14 @@
 <meta charset="UTF-8">
 <title>Downdetector Monitor</title>
 <style>
+  /* Fonte reduzida aos glifos de "DD.Monitor" (o único texto que a usa) e
+     convertida para woff2: 51,6 KB -> 1,1 KB. Se o texto do logo mudar, os
+     glifos novos precisam ser regerados, senão caem no fallback abaixo. */
   @font-face {
     font-family: 'Syne';
-    src: url('syne-800.ttf') format('truetype');
+    src: url('syne-800.woff2') format('woff2');
     font-weight: 800;
+    font-display: swap;
   }
   :root {
     --bg:      #0b0d12;
@@ -423,7 +427,7 @@
       <div class="two-col">
         <div class="field-group">
           <label>Intervalo (min)</label>
-          <input type="number" id="interval" min="1" max="60" value="10">
+          <input type="number" id="interval" min="1" max="60" value="15">
         </div>
         <div class="field-group">
           <label>Origem dos dados</label>

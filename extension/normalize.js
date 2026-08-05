@@ -45,14 +45,19 @@ function normalizePoint(point) {
 
   if (!point || typeof point !== "object") return null;
 
+  // reportsValue/baselineValue/timestampUtc são o formato atual do Downdetector
+  // (ChartDataPointType, via GraphQL). Sem eles o valor até era pego pelo
+  // fallback genérico abaixo, mas baseline e timestamp eram descartados.
   const valueKeys = [
     "value", "total", "y", "reports", "report", "count", "current",
-    "sum", "volume", "report_count", "number_of_reports"
+    "sum", "volume", "report_count", "number_of_reports", "reportsValue"
   ];
-  const baselineKeys = ["baseline", "expected", "typical", "average", "avg", "normal"];
+  const baselineKeys = [
+    "baseline", "expected", "typical", "average", "avg", "normal", "baselineValue"
+  ];
   const timestampKeys = [
     "timestamp", "point_in_time", "pointInTime", "datetime",
-    "date", "time", "x", "at", "created_at"
+    "date", "time", "x", "at", "created_at", "timestampUtc"
   ];
 
   let value = null;

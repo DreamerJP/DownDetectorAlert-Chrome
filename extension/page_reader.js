@@ -121,8 +121,14 @@
   // Override de animações do Recharts
   // — necessário para o SVG estabilizar a tempo da extração.
   // ============================================================
+  const ANIM_STYLE_ID = "__ddm_no_anim";
+
   const disableRechartsAnimations = () => {
+    // Este script é reinjetado a cada segundo enquanto a página carrega; sem a
+    // checagem de id acumulávamos dezenas de <style> idênticos por página.
+    if (document.getElementById(ANIM_STYLE_ID)) return;
     const style = document.createElement("style");
+    style.id = ANIM_STYLE_ID;
     style.textContent = `
       .recharts-curve, .recharts-area-area, .recharts-rectangle, .recharts-bar-rectangle, .recharts-area {
         transition: none !important;
@@ -430,6 +436,11 @@
   // fica dentro de um <a> que aponta pro domínio oficial. Preferimos favicon
   // (sempre quadrado) sobre o logo wide do Downdetector. Devolvemos uma lista
   // em ordem de preferência para o popup tentar uma a uma.
+  //
+  // Nota: os dois serviços de favicon abaixo são terceiros, então cada abertura
+  // do popup revela a eles quais serviços são monitorados. Decisão consciente —
+  // a alternativa (só o logo do Downdetector) piora bastante o visual, porque
+  // muitos logos são escritos e não cabem bem num ícone pequeno.
   const extractServiceIconUrls = () => {
     let officialDomain = null;
     let fallbackLogo = null;
@@ -529,19 +540,56 @@
   // ============================================================
   disableRechartsAnimations();
 
-  const declaredPeak = detectDeclaredPeak();
-  const reportUrl = findReportApiUrl();
+  // Marca a aba como worker da extensão. capture.js (content script, MAIN world)
+  // lê esta marca no document_start para só then aplicar os patches de rede e de
+  // visibilidade — sem isso ele mexeria também nas abas do Downdetector que o
+  // próprio usuário abre. sessionStorage é por aba e por origem, então a marca
+  // não vaza para outras abas.
+  try { sessionStorage.setItem("__ddm_worker", "1"); } catch (_e) { }
+
+  const cloudflareBlocked = detectCloudflareBlock();
   const capture = window.__DDMONITOR_CAPTURE__?.lastReport || null;
 
-  const svgChart = extractSvgChart(declaredPeak);
-  calibrateSvgWithPeak(svgChart, declaredPeak);
+  if (isHomePage) {
+    return {
+      isHomePage: true,
+      trendingServices: extractTrendingServices(),
+      serviceIconUrls: [],
+      reactChartData: null,
+      cloudflareBlocked,
+      reportUrl: null,
+      reportPayload: null,
+      peak: null,
+      svgHistory: [],
+      tickLabels: [],
+      periodLabel: "24h",
+      yAxisMax: null
+    };
+  }
+
+  const reactChartData = extractReactChartData();
+  const reportUrl = findReportApiUrl();
+  const declaredPeak = detectDeclaredPeak();
+
+  // extractSvgChart é de longe a parte mais cara deste script (centenas de
+  // getPointAtLength por path candidato) e é a ÚLTIMA opção — atrás do React e
+  // do payload da API. Como o script é reinjetado a cada segundo enquanto a
+  // página carrega, rodá-la incondicionalmente era pagar a fonte mais cara
+  // justamente nos casos em que ela nem seria usada.
+  const REACT_MIN_POINTS = 50;
+  const hasBetterSource =
+    (Array.isArray(reactChartData) && reactChartData.length >= REACT_MIN_POINTS) ||
+    Boolean(capture?.payload);
+
+  const svgChart = hasBetterSource ? null : extractSvgChart(declaredPeak);
+  if (svgChart) calibrateSvgWithPeak(svgChart, declaredPeak);
 
   return {
-    isHomePage,
-    trendingServices: isHomePage ? extractTrendingServices() : [],
-    serviceIconUrls: isHomePage ? [] : extractServiceIconUrls(),
-    reactChartData: isHomePage ? null : extractReactChartData(),
-    cloudflareBlocked: detectCloudflareBlock(),
+    isHomePage: false,
+    trendingServices: [],
+    serviceIconUrls: extractServiceIconUrls(),
+    reactChartData,
+    cloudflareBlocked,
     reportUrl: reportUrl || capture?.url || null,
     reportPayload: capture?.payload || null,
     peak: declaredPeak,

@@ -5,7 +5,7 @@ quando o número de reportes ultrapassa o limite configurado. Também detecta
 automaticamente os serviços em alta na home do Downdetector e os monitora
 enquanto estiverem com problemas.
 
-Versão atual: **1.1** · Manifest V3.
+Versão atual: **1.2** · Manifest V3 · requer Chrome 116+.
 
 ## Autor
 
@@ -18,11 +18,14 @@ Versão atual: **1.1** · Manifest V3.
 
 - Lista personalizada de serviços com limiar configurável por serviço
 - Detecção automática de serviços em alta (Trending) na home
-- Notificação ao **ultrapassar** o limiar e ao **normalizar** (recovery)
+- Notificação ao **ultrapassar** o limiar e ao **normalizar** (recovery);
+  clicar na notificação abre a página do serviço
 - Badge no ícone da extensão com a quantidade de serviços em falha
+- Gráfico das últimas 24h de cada serviço, direto no popup
 - Aba de **Logs** com o passo a passo do último ciclo de checagem
 - Botão de **liga/desliga** do monitoramento sem precisar desinstalar
-- Favicons dos serviços oficiais ao lado do nome (DuckDuckGo + fallback)
+- Favicons dos serviços oficiais ao lado do nome
+- Funciona sem abrir aba nenhuma na maior parte do tempo
 - Pausa automática quando todas as janelas do Chrome fecham (poupa CPU)
 - Cancelamento imediato da checagem em curso ao desligar o monitoramento
 
@@ -31,7 +34,8 @@ Versão atual: **1.1** · Manifest V3.
 1. Abra o Chrome e acesse: `chrome://extensions`
 2. Ative o **Modo do desenvolvedor** (canto superior direito)
 3. Clique em **"Carregar sem compactação"**
-4. Selecione a pasta deste repositório (`DownDetectorAlert-Chrome`)
+4. Selecione a pasta **`extension/`** deste repositório — não a raiz.
+   É lá que fica o `manifest.json`.
 5. O ícone DD.Monitor aparece na barra do Chrome
 
 ## Como usar
@@ -50,17 +54,20 @@ primeiro). Cada linha mostra:
 Clique numa linha para expandir o gráfico das últimas 24h.
 
 ### Aba Configurar
-- **Intervalo**: minutos entre checagens automáticas (1–60, padrão 10)
+- **Intervalo**: minutos entre checagens automáticas (1–60, padrão 15)
 - **Origem dos dados**: `.com.br` ou `.com`
 - **Trending**: ativa/desativa o monitoramento da home, define quantos
   serviços puxar e o limiar usado para eles
 - **Serviços monitorados**: lista manual com nome, slug e limiar individual
 
 ### Aba Logs
-Mostra o que aconteceu no último ciclo. Os logs são reiniciados a cada
-ciclo (intencional, para ficarem sempre relevantes). Cada serviço
-aparece com a fonte de extração usada entre colchetes: `[react]`,
-`[api]` ou `[svg]` (ver "Como funciona por baixo").
+Mostra o que aconteceu no último ciclo, reiniciando a cada checagem para
+ficar sempre relevante. As linhas saem na ordem em que cada serviço
+termina, que não é necessariamente a ordem da lista.
+
+Ao lado de cada serviço aparece a fonte usada entre colchetes. `[fetch]`
+é o normal; qualquer outra indica que a extensão precisou recorrer ao
+método reserva.
 
 ### Cabeçalho
 - **Botão ON/OFF** (lado esquerdo do ↺): pausa/retoma o monitoramento.
@@ -87,66 +94,38 @@ https://downdetector.com.br/status/SLUG/
 Exemplos: `youtube`, `netflix`, `tim`, `claro-net-virtua`, `steam`,
 `mercado-pago`, `vivo`, `nubank`.
 
-## Como funciona por baixo
+## Como funciona
 
-A extensão mantém uma aba pinada (chamada "Aba de Serviço") que carrega
-as páginas do Downdetector em segundo plano. Os reportes são extraídos
-de **três fontes**, em ordem de preferência (a primeira que funcionar
-é a usada):
+Na maior parte do tempo a extensão busca os dados em segundo plano, sem
+abrir nada. O gráfico do Downdetector já vem pronto na página, e é dele
+que sai a contagem de reportes.
 
-1. **`[react]` — Estado React do componente** (fonte primária)
-   O Downdetector é construído em Next.js/React e mantém o histórico
-   de reportes como prop `chartData` no estado do componente — um array
-   de 96 pontos com timestamp, value e baseline exatos. A extensão lê
-   esse array direto do React fiber. **É a mesma fonte que o servidor
-   enviou pra renderizar o gráfico**, sem perda na reconstrução.
+Como o site limita quantas buscas desse tipo aceita por vez, as consultas
+saem uma de cada vez, com pausa entre elas. Se o limite for atingido
+mesmo assim, a extensão recua sozinha e passa a usar um método alternativo:
+uma aba de apoio que carrega as páginas normalmente, como se você
+estivesse navegando. É mais lento, mas nunca esbarra em limite.
 
-2. **`[api]` — JSON da API** (fonte secundária)
-   Quando a página chama `data-api.downdetector.com/v1/companies/.../report`,
-   um content script intercepta o response via `fetch`/`XHR` patching e
-   guarda o payload. Hoje em dia o Downdetector raramente faz essa
-   chamada (entrega tudo via SSR + estado React), mas o caminho fica
-   ativo como redundância.
+Você não precisa fazer nada nessa troca — ela é automática, e os dados
+chegam do mesmo jeito. A aba de apoio só existe enquanto for necessária.
 
-3. **`[svg]` — Reconstrução do gráfico SVG** (fallback)
-   Se nem React nem API funcionaram, a extensão amostra o path SVG do
-   gráfico (96 buckets ao longo da largura) e reconstrói a série
-   estimando o eixo Y a partir dos labels visíveis. É aproximado
-   (~95% de precisão) e depende da animação do Recharts ter terminado.
+## Estrutura do repositório
 
-Cada linha de log indica qual fonte foi usada. Em condições normais,
-todas devem ser `[react]`.
-
-A aba worker bloqueia anúncios via `declarativeNetRequest` e fica mutada
-para não atrapalhar. **Não feche essa aba manualmente.** Se fechar, a
-extensão detecta na próxima iteração e recria automaticamente.
-
-Quando o Cloudflare exige verificação humana, a extensão tenta recarregar
-a página silenciosamente uma vez. Se persistir, traz a aba ao foco e
-notifica o usuário a resolver o captcha.
-
-## Estrutura do código
-
-| Arquivo | Função |
-|---|---|
-| `manifest.json` | Manifest V3 |
-| `background.js` | Service worker — lifecycle, alarmes, mensagens, loop principal |
-| `constants.js` | Constantes globais (thresholds padrão, etc.) |
-| `utils.js` | Helpers genéricos (delay, withTimeout, sanitizers, parsing) |
-| `normalize.js` | Normalização de séries vindas do payload da API |
-| `config.js` | Configuração padrão e helpers de leitura/normalização |
-| `scrape.js` | Aba worker, navegação e extração por serviço |
-| `capture.js` | Content script (MAIN world) que captura fetch/XHR |
-| `page_reader.js` | Leitor injetado para extrair gráfico, logo e trending |
-| `popup.html`/`popup.js` | UI do popup (status, config, logs) |
-| `worker.html` | Página exibida na aba pinada |
+```
+README.md    este arquivo
+LICENSE
+extension/   a extensão em si; é esta pasta que o Chrome carrega
+```
 
 ## Permissões
 
 - `alarms` — agendar checagens periódicas
 - `notifications` — alertas de queda/recovery
-- `storage` — persistir config (sync) e estado (local)
-- `scripting` — injetar `page_reader.js`
-- `tabs` — gerenciar a aba worker
-- `declarativeNetRequest` — bloquear anúncios na aba worker
+- `storage` — guardar configuração e estado
+- `scripting` — ler o gráfico quando usa a aba de apoio
+- `tabs` — gerenciar a aba de apoio
+- `declarativeNetRequest` — bloquear anúncios na aba de apoio
 - `host_permissions` — restritas a `*.downdetector.com.br/*` e `*.downdetector.com/*`
+
+Nenhum dado sai da sua máquina além das requisições ao próprio Downdetector
+e da busca dos favicons dos serviços monitorados.

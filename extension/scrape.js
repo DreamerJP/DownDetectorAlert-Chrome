@@ -1,8 +1,43 @@
 // Gerência da aba worker, navegação e extração de dados de cada serviço.
-// Depende de utils.js (delay, withTimeout, sanitizeSourceSite, isRetryableServiceError)
+// Depende de utils.js (delay, sanitizeSourceSite, isRetryableServiceError)
 // e normalize.js (extractHistoryFromPayload).
 
 const WORKER_TAB_ID_KEY = "workerTabId";
+const ADBLOCK_RULE_ID = 1;
+
+const AD_DOMAINS = [
+  "googlesyndication.com",
+  "doubleclick.net",
+  "pubmatic.com",
+  "rubiconproject.com",
+  "criteo.com",
+  "quantserve.com",
+  "scorecardresearch.com",
+  "amazon-adsystem.com",
+  "taboola.com",
+  "outbrain.com",
+  "teads.tv"
+];
+
+// A regra é presa a um tabId, e o id da aba MUDA a cada chrome.tabs.discard.
+// Session rules também somem quando o navegador reinicia. Por isso o adblock
+// precisa ser reaplicado em todo ponto onde o id do worker é definido ou muda,
+// e não só na criação da aba.
+async function applyAdblockRule(tabId) {
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [ADBLOCK_RULE_ID],
+      addRules: [{
+        id: ADBLOCK_RULE_ID,
+        priority: 1,
+        action: { type: "block" },
+        condition: { tabIds: [tabId], requestDomains: AD_DOMAINS }
+      }]
+    });
+  } catch (_error) {
+    console.warn("Falha ao aplicar adblock na aba.");
+  }
+}
 
 async function ensureWorkerTabAlive(currentTabId) {
   // Se a aba foi fechada manualmente entre serviços, a próxima chamada a
@@ -11,7 +46,7 @@ async function ensureWorkerTabAlive(currentTabId) {
     await chrome.tabs.get(currentTabId);
     return currentTabId;
   } catch (_error) {
-    await chrome.storage.local.remove(WORKER_TAB_ID_KEY);
+    await chrome.storage.session.remove(WORKER_TAB_ID_KEY);
     const recreated = await getOrCreateWorkerTab();
     return recreated.id;
   }
@@ -19,7 +54,7 @@ async function ensureWorkerTabAlive(currentTabId) {
 
 async function getOrCreateWorkerTab() {
   const workerUrl = chrome.runtime.getURL("worker.html");
-  const { workerTabId } = await chrome.storage.local.get(WORKER_TAB_ID_KEY);
+  const { workerTabId } = await chrome.storage.session.get(WORKER_TAB_ID_KEY);
 
   if (Number.isInteger(workerTabId)) {
     try {
@@ -29,9 +64,10 @@ async function getOrCreateWorkerTab() {
       } else {
         await chrome.tabs.update(existingTab.id, { muted: true });
       }
+      await applyAdblockRule(existingTab.id);
       return existingTab;
     } catch (_error) {
-      await chrome.storage.local.remove(WORKER_TAB_ID_KEY);
+      await chrome.storage.session.remove(WORKER_TAB_ID_KEY);
     }
   }
 
@@ -39,13 +75,14 @@ async function getOrCreateWorkerTab() {
   const tabs = await chrome.tabs.query({ url: workerUrl });
   if (tabs.length > 0) {
     const foundTab = tabs[0];
-    await chrome.storage.local.set({ [WORKER_TAB_ID_KEY]: foundTab.id });
+    await chrome.storage.session.set({ [WORKER_TAB_ID_KEY]: foundTab.id });
 
     // Garante que está pinada e mutada
     try {
       await chrome.tabs.update(foundTab.id, { pinned: true, muted: true });
     } catch (_e) { }
 
+    await applyAdblockRule(foundTab.id);
     return foundTab;
   }
 
@@ -59,36 +96,8 @@ async function getOrCreateWorkerTab() {
     await chrome.tabs.update(createdTab.id, { muted: true });
   } catch (_e) { }
 
-  try {
-    await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [1],
-      addRules: [{
-        id: 1,
-        priority: 1,
-        action: { type: "block" },
-        condition: {
-          tabIds: [createdTab.id],
-          requestDomains: [
-            "googlesyndication.com",
-            "doubleclick.net",
-            "pubmatic.com",
-            "rubiconproject.com",
-            "criteo.com",
-            "quantserve.com",
-            "scorecardresearch.com",
-            "amazon-adsystem.com",
-            "taboola.com",
-            "outbrain.com",
-            "teads.tv"
-          ]
-        }
-      }]
-    });
-  } catch (_error) {
-    console.warn("Falha ao aplicar adblock na aba.");
-  }
-
-  await chrome.storage.local.set({ [WORKER_TAB_ID_KEY]: createdTab.id });
+  await applyAdblockRule(createdTab.id);
+  await chrome.storage.session.set({ [WORKER_TAB_ID_KEY]: createdTab.id });
   return createdTab;
 }
 

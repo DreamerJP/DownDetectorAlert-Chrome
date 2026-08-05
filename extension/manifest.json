@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Downdetector Monitor",
-  "version": "1.1",
+  "version": "1.2",
   "description": "Monitora serviços no Downdetector e avisa quando há falhas.",
+  "minimum_chrome_version": "116",
   "permissions": [
     "alarms",
     "notifications",

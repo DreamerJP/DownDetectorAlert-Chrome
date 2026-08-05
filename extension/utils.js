@@ -3,6 +3,7 @@
 
 const TRANSIENT_SERVICE_ERROR_PATTERNS = [
   /timeout/i,
+  /timed out/i,   // AbortSignal.timeout() lança DOMException("signal timed out")
   /o gr[aá]fico real n[aã]o apareceu/i,
   /n[aã]o consegui transformar o gr[aá]fico renderizado em s[ée]rie/i,
   /receiving end does not exist/i,
@@ -16,11 +17,18 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function withTimeout(promise, timeoutMs) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout máximo atingido para o serviço.")), timeoutMs))
-  ]);
+// Roda `worker` sobre `items` com no máximo `limit` execuções simultâneas.
+async function runWithConcurrency(items, limit, worker) {
+  const queue = [...items];
+  const runnerCount = Math.max(1, Math.min(limit, queue.length));
+
+  await Promise.all(
+    Array.from({ length: runnerCount }, async () => {
+      while (queue.length > 0) {
+        await worker(queue.shift());
+      }
+    })
+  );
 }
 
 function isRetryableServiceError(error) {

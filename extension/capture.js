@@ -1,5 +1,17 @@
 (() => {
   if (window.__DDMONITOR_CAPTURE_INSTALLED__) return;
+
+  // Só age na aba worker da extensão. A marca é gravada por page_reader.js, que
+  // só roda lá. Sem essa checagem, este script patcheava fetch/XHR e falsificava
+  // document.hidden/hasFocus em QUALQUER aba do Downdetector — inclusive as que
+  // o próprio usuário abre, fazendo a página continuar animando em segundo plano.
+  // sessionStorage é por aba e por origem, então nada vaza entre abas.
+  let isWorkerTab = false;
+  try {
+    isWorkerTab = sessionStorage.getItem("__ddm_worker") === "1";
+  } catch (_error) { }
+  if (!isWorkerTab) return;
+
   window.__DDMONITOR_CAPTURE_INSTALLED__ = true;
 
   const REPORT_URL_PATTERN = /^https:\/\/data-api\.downdetector\.com\/v1\/companies\/\d+\/report\?/i;
@@ -15,8 +27,8 @@
     };
   };
 
-  // Only override visibility on background/inactive tabs (the worker tab).
-  // This prevents interfering when the user is actively browsing Downdetector.
+  // Mantém o segundo guarda: mesmo na aba worker, se ela estiver em primeiro
+  // plano (usuário resolvendo um captcha, por exemplo) não há o que forçar.
   const applyVisibilityOverrides = () => {
     if (document.visibilityState === "visible" && document.hasFocus()) return;
 

@@ -384,7 +384,7 @@ async function refreshStatus() {
 
 async function renderLogs() {
   try {
-    const { logs = [] } = await chrome.storage.local.get("logs");
+    const { logs = [] } = await chrome.storage.session.get("logs");
     const container = document.getElementById("log-container");
     if (!container) return;
 
@@ -403,41 +403,51 @@ async function renderLogs() {
   } catch (e) { console.warn("Render logs failed", e); }
 }
 
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local") return;
+// Spinner + contador no cabeçalho. Usado tanto no boot quanto a cada mudança
+// de progresso — antes as duas cópias tinham divergido de leve.
+function applyProgressUi(data) {
+  const el = document.getElementById("last-check");
+  const btn = document.getElementById("btn-refresh");
+  const header = document.querySelector("header");
+  if (!el || !btn || !header) return;
 
-  // Show check progress in the header
-  if (changes.isChecking || changes.checkCompleted || changes.checkTotal || changes.statusText) {
-    chrome.storage.local.get(["isChecking", "checkCompleted", "checkTotal", "statusText"]).then(data => {
-      const el = document.getElementById("last-check");
-      const btn = document.getElementById("btn-refresh");
-      const header = document.querySelector("header");
-      
-      if (data.isChecking) {
-        btn.style.display = "none";
-        if (!document.getElementById("active-spinner")) {
-          const spinner = document.createElement("div");
-          spinner.id = "active-spinner";
-          spinner.className = "spinner";
-          header.querySelector(".header-right").appendChild(spinner);
-        }
-        
-        if (data.statusText) {
-          el.textContent = data.statusText;
-        } else if (Number.isFinite(data.checkCompleted) && Number.isFinite(data.checkTotal) && data.checkCompleted < data.checkTotal) {
-          el.textContent = `Verificando ${data.checkCompleted + 1}/${data.checkTotal}...`;
-        }
-      } else {
-        btn.style.display = "block";
-        btn.disabled = false;
-        btn.innerHTML = SVG_ICONS.refresh;
-        const spinner = document.getElementById("active-spinner");
-        if (spinner) spinner.remove();
-      }
-    });
+  if (!data.isChecking) {
+    btn.style.display = "block";
+    btn.disabled = false;
+    btn.innerHTML = SVG_ICONS.refresh;
+    document.getElementById("active-spinner")?.remove();
+    return;
   }
 
-  if (changes.logs) renderLogs();
+  btn.style.display = "none";
+  if (!document.getElementById("active-spinner")) {
+    const spinner = document.createElement("div");
+    spinner.id = "active-spinner";
+    spinner.className = "spinner";
+    header.querySelector(".header-right").appendChild(spinner);
+  }
+
+  if (data.statusText) {
+    el.textContent = data.statusText;
+  } else if (Number.isFinite(data.checkCompleted) && Number.isFinite(data.checkTotal) && data.checkCompleted < data.checkTotal) {
+    el.textContent = `Verificando ${data.checkCompleted + 1}/${data.checkTotal}...`;
+  }
+}
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  // Logs e progresso migraram para storage.session (memória).
+  // statusMap e lastCheck seguem em storage.local (precisam sobreviver a restart).
+  if (areaName === "session") {
+    if (changes.logs) renderLogs();
+    if (changes.isChecking || changes.checkCompleted || changes.checkTotal || changes.statusText) {
+      chrome.storage.session
+        .get(["isChecking", "checkCompleted", "checkTotal", "statusText"])
+        .then(applyProgressUi);
+    }
+    return;
+  }
+
+  if (areaName !== "local") return;
   if (!changes.statusMap && !changes.lastCheck) return;
 
   const nextStatusMap = changes.statusMap ? changes.statusMap.newValue : latestStatusMap;
@@ -558,7 +568,7 @@ document.getElementById("btn-add").addEventListener("click", () => {
 document.getElementById("btn-save").addEventListener("click", async () => {
   const btn = document.getElementById("btn-save");
   const config = {
-    interval_minutes: parseInt(document.getElementById("interval").value) || 10,
+    interval_minutes: parseInt(document.getElementById("interval").value) || DEFAULT_INTERVAL_MINUTES,
     source_site: document.getElementById("source-site").value || DEFAULT_SOURCE_SITE,
     top_services_enabled: document.getElementById("top-enabled").checked,
     top_services_count: parseInt(document.getElementById("top-count").value) || 5,
@@ -626,34 +636,13 @@ document.getElementById("btn-toggle-monitoring")?.addEventListener("click", asyn
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 async function boot() {
-  const data = await chrome.storage.local.get(["isChecking", "statusText", "checkCompleted", "checkTotal", "monitoringEnabled"]);
-  
-  // Inicializa o toggle de monitoramento
-  applyToggleState(data.monitoringEnabled !== false);
-  const btn = document.getElementById("btn-refresh");
-  const el = document.getElementById("last-check");
-  const header = document.querySelector("header");
-  
-  if (data.isChecking) {
-    btn.style.display = "none";
-    if (!document.getElementById("active-spinner")) {
-      const spinner = document.createElement("div");
-      spinner.id = "active-spinner";
-      spinner.className = "spinner";
-      header.querySelector(".header-right").appendChild(spinner);
-    }
-    
-    if (data.statusText) {
-      el.textContent = data.statusText;
-    } else if (Number.isFinite(data.checkCompleted) && Number.isFinite(data.checkTotal)) {
-      el.textContent = `Verificando ${data.checkCompleted + 1}/${data.checkTotal}...`;
-    }
-  } else {
-    btn.style.display = "block";
-    btn.innerHTML = SVG_ICONS.refresh;
-    const spinner = document.getElementById("active-spinner");
-    if (spinner) spinner.remove();
-  }
+  const [progress, local] = await Promise.all([
+    chrome.storage.session.get(["isChecking", "statusText", "checkCompleted", "checkTotal"]),
+    chrome.storage.local.get("monitoringEnabled")
+  ]);
+
+  applyToggleState(local.monitoringEnabled !== false);
+  applyProgressUi(progress);
 
   refreshStatus().catch(() => {
     document.getElementById("status-list").innerHTML =
