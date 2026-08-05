@@ -17,20 +17,6 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Roda `worker` sobre `items` com no máximo `limit` execuções simultâneas.
-async function runWithConcurrency(items, limit, worker) {
-  const queue = [...items];
-  const runnerCount = Math.max(1, Math.min(limit, queue.length));
-
-  await Promise.all(
-    Array.from({ length: runnerCount }, async () => {
-      while (queue.length > 0) {
-        await worker(queue.shift());
-      }
-    })
-  );
-}
-
 function isRetryableServiceError(error) {
   const message = String(error?.message || error || "").trim();
   if (!message) return false;

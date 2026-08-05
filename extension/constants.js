@@ -13,16 +13,12 @@ const SERVICE_TIMEOUT_MS = 25000;
 // devolveu 429 na primeira rajada e derrubou o ciclo inteiro para a aba. Uma por
 // vez, com pausa entre elas, é o que mantém a busca direta viável — ainda assim
 // é bem mais rápido que carregar a página inteira numa aba.
-const DIRECT_FETCH_CONCURRENCY = 1;
-// 2s é o valor conservador de partida: ainda não medimos qual ritmo o Cloudflare
-// aceita, e errar para baixo custa um bloqueio de 30 min. Dá para reduzir depois
-// de medir — ver o teste de calibragem no README.
-const DIRECT_FETCH_GAP_MS = 2000;
-
-// Ao tomar 429, para de insistir por um tempo: continuar tentando a cada ciclo
-// só renova o bloqueio. Nesse período vai direto para a aba.
-const RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
-const RATE_LIMIT_KEY = "directFetchBlockedUntil";
+// Nota histórica: houve uma tentativa de buscar os dados por fetch direto do
+// service worker, sem abrir aba. Foi removida em 05/08/2026. Funcionava por
+// algumas requisições e então o Cloudflare passava a exigir verificação (403),
+// que um fetch não tem como resolver — sem página, sem JavaScript, sem saída.
+// Pior: gastava o passe de liberação do perfil, degradando a navegação normal
+// do usuário no site. A aba resolve verificação sozinha; por isso ela ficou.
 
 const DEFAULT_TOP_SERVICES_COUNT = 5;
 const DEFAULT_TOP_SERVICES_ENABLED = true;

@@ -25,7 +25,6 @@ Versão atual: **1.2** · Manifest V3 · requer Chrome 116+.
 - Aba de **Logs** com o passo a passo do último ciclo de checagem
 - Botão de **liga/desliga** do monitoramento sem precisar desinstalar
 - Favicons dos serviços oficiais ao lado do nome
-- Funciona sem abrir aba nenhuma na maior parte do tempo
 - Pausa automática quando todas as janelas do Chrome fecham (poupa CPU)
 - Cancelamento imediato da checagem em curso ao desligar o monitoramento
 
@@ -62,12 +61,11 @@ Clique numa linha para expandir o gráfico das últimas 24h.
 
 ### Aba Logs
 Mostra o que aconteceu no último ciclo, reiniciando a cada checagem para
-ficar sempre relevante. As linhas saem na ordem em que cada serviço
-termina, que não é necessariamente a ordem da lista.
+ficar sempre relevante.
 
-Ao lado de cada serviço aparece a fonte usada entre colchetes. `[fetch]`
-é o normal; qualquer outra indica que a extensão precisou recorrer ao
-método reserva.
+Ao lado de cada serviço aparece entre colchetes de onde o número veio.
+`[react]` é o normal. `[api]` e `[svg]` são caminhos alternativos, usados
+quando o primeiro não funciona.
 
 ### Cabeçalho
 - **Botão ON/OFF** (lado esquerdo do ↺): pausa/retoma o monitoramento.
@@ -96,18 +94,16 @@ Exemplos: `youtube`, `netflix`, `tim`, `claro-net-virtua`, `steam`,
 
 ## Como funciona
 
-Na maior parte do tempo a extensão busca os dados em segundo plano, sem
-abrir nada. O gráfico do Downdetector já vem pronto na página, e é dele
-que sai a contagem de reportes.
+A extensão mantém uma aba de apoio, fixada e silenciada, onde carrega as
+páginas do Downdetector uma de cada vez em segundo plano. De cada página
+ela lê o gráfico das últimas 24h e compara o valor atual com o seu limiar.
 
-Como o site limita quantas buscas desse tipo aceita por vez, as consultas
-saem uma de cada vez, com pausa entre elas. Se o limite for atingido
-mesmo assim, a extensão recua sozinha e passa a usar um método alternativo:
-uma aba de apoio que carrega as páginas normalmente, como se você
-estivesse navegando. É mais lento, mas nunca esbarra em limite.
+Entre as checagens essa aba é descarregada da memória, e o Chrome a
+recarrega sozinho na próxima vez. **Não precisa fechar essa aba.** Se
+fechar, a extensão recria quando precisar.
 
-Você não precisa fazer nada nessa troca — ela é automática, e os dados
-chegam do mesmo jeito. A aba de apoio só existe enquanto for necessária.
+Carregar as páginas de verdade, como um navegador comum, é o que permite
+resolver sozinha a verificação de segurança que o site às vezes exige.
 
 ## Estrutura do repositório
 

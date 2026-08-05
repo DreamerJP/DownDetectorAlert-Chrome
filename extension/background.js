@@ -7,7 +7,7 @@
 //   config.js     - DEFAULT_CONFIG, normalizeConfig, ensureConfig
 //   scrape.js     - aba worker, navegação e extração por serviço
 
-importScripts('constants.js', 'utils.js', 'normalize.js', 'config.js', 'scrape.js', 'direct_fetch.js');
+importScripts('constants.js', 'utils.js', 'normalize.js', 'config.js', 'scrape.js');
 
 let activeCheckPromise = null;
 let activeCheckAbortController = null;
@@ -27,9 +27,8 @@ let activeCheckAbortController = null;
 // (LevelDB, disco). addLog reescreve o array inteiro a cada linha e persistProgress
 // roda a cada serviço — em disco isso dava dezenas de gravações por ciclo, a cada
 // 10 minutos, o dia inteiro. Nada aqui precisa sobreviver a um restart do navegador.
-// As gravações são enfileiradas porque addLog faz ler-alterar-gravar do array
-// inteiro. Com a busca direta rodando vários serviços em paralelo, chamadas
-// simultâneas se sobrescreveriam e linhas sumiriam do log.
+// addLog faz ler-alterar-gravar do array inteiro, então duas chamadas que se
+// cruzem perderiam uma linha. A fila garante que cada gravação veja a anterior.
 let logWriteQueue = Promise.resolve();
 
 async function addLog(msg, type = "info") {
@@ -265,8 +264,7 @@ async function performCheckAllServices() {
   const servicesToCheck = [...config.services];
   const abortSignal = activeCheckAbortController?.signal;
 
-  // A aba worker virou plano B: só é criada se a busca direta falhar em algum
-  // serviço. No caminho normal ela nunca chega a existir.
+  // A aba é criada sob demanda, na primeira vez que alguém precisar dela.
   let workerTabId = null;
   const ensureTab = async () => {
     if (workerTabId === null) {
@@ -290,26 +288,17 @@ async function performCheckAllServices() {
 
     let trendingServices = null;
     try {
-      trendingServices = await fetchTrendingDirect(config.source_site, abortSignal);
-    } catch (fetchError) {
-      await addLog(`Home direto falhou (${fetchError.message}). Tentando pela aba...`, "warn");
-      try {
-        const homeUrl = config.source_site === "com" ? "https://downdetector.com/" : "https://downdetector.com.br/";
-        const tabId = await ensureTab();
-        await updateTabAndWait(tabId, homeUrl, abortSignal);
-        const homeSignals = await readPageSignals(tabId);
-        if (Array.isArray(homeSignals?.trendingServices)) {
-          trendingServices = homeSignals.trendingServices;
-        }
-      } catch (tabError) {
-        await addLog(`Erro ao buscar tendências: ${tabError.message}`, "error");
-        console.error("Erro ao buscar serviços em destaque:", tabError);
+      const homeUrl = config.source_site === "com" ? "https://downdetector.com/" : "https://downdetector.com.br/";
+      const tabId = await ensureTab();
+      await updateTabAndWait(tabId, homeUrl, abortSignal);
+      const homeSignals = await readPageSignals(tabId);
+      if (Array.isArray(homeSignals?.trendingServices)) {
+        trendingServices = homeSignals.trendingServices;
       }
+    } catch (error) {
+      await addLog(`Erro ao buscar tendências: ${error.message}`, "error");
+      console.error("Erro ao buscar serviços em destaque:", error);
     }
-
-    // A busca da home também conta para o limite: sem esta pausa, ela e a
-    // primeira busca de serviço saíam praticamente juntas.
-    if (trendingServices) await delay(DIRECT_FETCH_GAP_MS);
 
     if (Array.isArray(trendingServices)) {
       const topCount = config.top_services_count || DEFAULT_TOP_SERVICES_COUNT;
@@ -398,90 +387,32 @@ async function performCheckAllServices() {
   };
 
   try {
-    // Fase 1 — busca direta, sem abrir aba. É o caminho normal.
-    const needsTab = [];
-    let firstDirectError = null;
-    let rateLimited = false;
-
-    const { [RATE_LIMIT_KEY]: blockedUntil = 0 } = await chrome.storage.session.get(RATE_LIMIT_KEY);
-
-    if (Date.now() < blockedUntil) {
-      const minutes = Math.ceil((blockedUntil - Date.now()) / 60000);
-      await addLog(`Busca direta em pausa (limite atingido). Retoma em ~${minutes} min.`, "warn");
-      needsTab.push(...servicesToCheck);
-    } else {
-      await runWithConcurrency(servicesToCheck, DIRECT_FETCH_CONCURRENCY, async service => {
-        if (abortSignal?.aborted) return;
-
-        // Depois de um 429 não adianta insistir com os que faltam: vão direto
-        // para a aba, e o bloqueio fica registrado para os próximos ciclos.
-        if (rateLimited) {
-          needsTab.push(service);
-          return;
-        }
-
-        try {
-          const result = await fetchServiceDirect(service.slug, config.source_site, abortSignal);
-          await applyServiceResult(service, result, context);
-          await reportProgress();
-        } catch (error) {
-          if (abortSignal?.aborted) return;
-
-          if (error.rateLimited) {
-            rateLimited = true;
-            const cooldown = Number.isFinite(error.retryAfterMs) ? error.retryAfterMs : RATE_LIMIT_COOLDOWN_MS;
-            await chrome.storage.session.set({ [RATE_LIMIT_KEY]: Date.now() + cooldown });
-          }
-
-          // Erro por serviço não vira log (seria ruído se a aba resolver), mas o
-          // primeiro motivo aparece na linha de resumo abaixo — sem ele, um
-          // problema na busca direta ficaria invisível fora do console.
-          if (!firstDirectError) firstDirectError = error?.message || String(error);
-          console.warn(`Busca direta falhou para ${service.slug}:`, error?.message || error);
-          needsTab.push(service);
-          return;
-        }
-
-        // Ritmo: é isto que evita a rajada que derrubou o ciclo anterior.
-        await delay(DIRECT_FETCH_GAP_MS);
-      });
-    }
-
-    if (abortSignal?.aborted) {
-      await addLog("Verificação cancelada pelo usuário.", "warn");
-    } else if (needsTab.length > 0) {
-      // Fase 2 — o que não veio direto cai na aba, um de cada vez (é uma aba só).
-      const reason = firstDirectError ? ` (${firstDirectError})` : "";
-      await addLog(`${needsTab.length} sem resposta direta${reason}. Usando a aba...`, "warn");
-
-      for (const service of needsTab) {
-        if (abortSignal?.aborted) {
-          await addLog("Verificação cancelada pelo usuário.", "warn");
-          break;
-        }
-
-        try {
-          await addLog(`Checando ${shortName(service.name)} pela aba...`);
-          const tabId = await ensureTab();
-          // O timeout entra como signal (e não como Promise.race) para que o
-          // estouro realmente aborte o scrape. Antes, o loop de leitura continuava
-          // rodando na aba depois do timeout e se sobrepunha ao serviço seguinte.
-          const serviceSignal = abortSignal
-            ? AbortSignal.any([abortSignal, AbortSignal.timeout(SERVICE_TIMEOUT_MS)])
-            : AbortSignal.timeout(SERVICE_TIMEOUT_MS);
-          const result = await scrapeServiceWithRetry(tabId, service.slug, config.source_site, serviceSignal);
-          await applyServiceResult(service, result, context);
-        } catch (error) {
-          await applyServiceError(service, error, context);
-        }
-
-        await reportProgress();
-        await delay(250);
+    for (const service of servicesToCheck) {
+      if (abortSignal?.aborted) {
+        await addLog("Verificação cancelada pelo usuário.", "warn");
+        break;
       }
+
+      try {
+        await addLog(`Checando ${shortName(service.name)}...`);
+        const tabId = await ensureTab();
+        // O timeout entra como signal (e não como Promise.race) para que o
+        // estouro realmente aborte o scrape. Antes, o loop de leitura continuava
+        // rodando na aba depois do timeout e se sobrepunha ao serviço seguinte.
+        const serviceSignal = abortSignal
+          ? AbortSignal.any([abortSignal, AbortSignal.timeout(SERVICE_TIMEOUT_MS)])
+          : AbortSignal.timeout(SERVICE_TIMEOUT_MS);
+        const result = await scrapeServiceWithRetry(tabId, service.slug, config.source_site, serviceSignal);
+        await applyServiceResult(service, result, context);
+      } catch (error) {
+        await applyServiceError(service, error, context);
+      }
+
+      await reportProgress();
+      await delay(250);
     }
   } finally {
-    // A aba só existe se a fase 2 precisou dela. No caminho normal não há o que
-    // limpar — que é justamente o ponto da busca direta.
+    // A aba pode não ter sido criada (lista vazia, ou cancelamento logo no início).
     if (workerTabId !== null) {
       // 1. Volta para worker.html (página leve da extensão).
       // 2. Descarta a aba: o Chrome libera a memória mantendo a aba na lista.
