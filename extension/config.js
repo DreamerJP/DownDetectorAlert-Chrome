@@ -52,7 +52,10 @@ function upgradeLegacyConfig(config) {
 function normalizeConfig(config) {
   const upgraded = upgradeLegacyConfig(config || DEFAULT_CONFIG) || DEFAULT_CONFIG;
   const fallbackServices = Array.isArray(DEFAULT_CONFIG.services) ? DEFAULT_CONFIG.services : [];
-  const inputServices = Array.isArray(upgraded.services) && upgraded.services.length
+  // Uma lista vazia é uma escolha válida: permite usar somente Trending ou
+  // pausar a lista manual. Só configurações legadas que não possuíam o campo
+  // services recebem a lista padrão.
+  const inputServices = Array.isArray(upgraded.services)
     ? upgraded.services
     : fallbackServices;
 
@@ -64,18 +67,47 @@ function normalizeConfig(config) {
     top_services_count: Math.max(1, Math.min(20, parseInt(upgraded.top_services_count, 10) || DEFAULT_TOP_SERVICES_COUNT)),
     top_services_threshold: Math.max(1, parseInt(upgraded.top_services_threshold, 10) || DEFAULT_TOP_SERVICES_THRESHOLD),
     services: inputServices
-      .filter(service => service && service.slug)
+      .filter(Boolean)
       .map(service => ({
-        slug: String(service.slug).trim().toLowerCase(),
+        slug: sanitizeSlug(service.slug),
         name: String(service.name || service.slug).trim(),
         threshold: sanitizeThreshold(service.threshold)
       }))
       .filter(service => {
+        if (!service.slug) return false;
         if (seen.has(service.slug)) return false;
         seen.add(service.slug);
         return true;
       })
   };
+}
+
+// Diz o que a normalização jogou fora e por quê. Sem isso a linha some da tela
+// e o botão ainda anuncia que salvou, sem o usuário entender o que aconteceu.
+function listRejectedServices(rawConfig, normalizedConfig) {
+  const input = Array.isArray(rawConfig?.services) ? rawConfig.services : [];
+  const accepted = new Set((normalizedConfig?.services || []).map(service => service.slug));
+  const seen = new Set();
+  const rejected = [];
+
+  for (const service of input) {
+    const label = String(service?.name || service?.slug || "").trim() || "(sem nome)";
+    const slug = sanitizeSlug(service?.slug);
+
+    if (!slug) {
+      rejected.push({ label, reason: "endereço inválido" });
+      continue;
+    }
+    if (seen.has(slug)) {
+      rejected.push({ label, reason: "repetido" });
+      continue;
+    }
+
+    seen.add(slug);
+    if (!accepted.has(slug)) rejected.push({ label, reason: "descartado" });
+  }
+
+  return rejected;
 }
 
 async function ensureConfig() {

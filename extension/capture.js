@@ -1,16 +1,27 @@
 (() => {
   if (window.__DDMONITOR_CAPTURE_INSTALLED__) return;
 
-  // Só age na aba worker da extensão. A marca é gravada por page_reader.js, que
-  // só roda lá. Sem essa checagem, este script patcheava fetch/XHR e falsificava
-  // document.hidden/hasFocus em QUALQUER aba do Downdetector — inclusive as que
-  // o próprio usuário abre, fazendo a página continuar animando em segundo plano.
-  // sessionStorage é por aba e por origem, então nada vaza entre abas.
+  // Só age na aba worker da extensão. O fragmento é anexado pelo background e
+  // está disponível no document_start; logo o interceptor também cobre a
+  // primeira navegação, antes de a aplicação chamar fetch/XHR. sessionStorage
+  // mantém a marca nas navegações seguintes da mesma aba/origem.
   let isWorkerTab = false;
+  let markedByHash = false;
   try {
-    isWorkerTab = sessionStorage.getItem("__ddm_worker") === "1";
+    markedByHash = /^#ddm-[a-z0-9]+$/.test(location.hash);
+    isWorkerTab = markedByHash || sessionStorage.getItem("__ddm_worker") === "1";
+    if (isWorkerTab) sessionStorage.setItem("__ddm_worker", "1");
   } catch (_error) { }
   if (!isWorkerTab) return;
+
+  // Apaga o fragmento antes dos scripts da página rodarem. A marca já foi lida
+  // e guardada; deixá-la na barra de endereço só daria ao site um traço a mais
+  // para reconhecer a aba automatizada.
+  if (markedByHash) {
+    try {
+      history.replaceState(history.state, "", location.pathname + location.search);
+    } catch (_error) { }
+  }
 
   window.__DDMONITOR_CAPTURE_INSTALLED__ = true;
 

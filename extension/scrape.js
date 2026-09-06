@@ -4,6 +4,13 @@
 
 const WORKER_TAB_ID_KEY = "workerTabId";
 const ADBLOCK_RULE_ID = 1;
+// O fragmento não é enviado ao servidor. Ele permite que capture.js reconheça
+// a aba de trabalho já no document_start, antes de a página disparar fetch/XHR.
+// O sufixo muda a cada início do service worker e capture.js apaga o fragmento
+// da barra assim que se instala: um valor fixo e permanente seria mais um
+// traço estável para a detecção de robô do site.
+const WORKER_MARKER_PREFIX = "#ddm-";
+const WORKER_PAGE_MARKER = WORKER_MARKER_PREFIX + Math.random().toString(36).slice(2, 10);
 
 const AD_DOMAINS = [
   "googlesyndication.com",
@@ -163,14 +170,33 @@ async function readPageSignals(tabId) {
   };
 }
 
-async function waitForPageSignals(tabId, abortSignal) {
+// Sinais suficientes para uma página de serviço. Mín 50 pontos: o React
+// costuma popular o array completo de uma vez (96 pontos), mas em alguns SSRs
+// ele aparece parcial (10-30) e completa em ms. Aceitar parcial fazia o
+// "current" ser um ponto velho do gráfico.
+function hasServicePageSignals(signals) {
+  return Boolean(
+    signals?.reportPayload ||
+    (Array.isArray(signals?.reactChartData) && signals.reactChartData.length >= 50) ||
+    (Array.isArray(signals?.svgHistory) && signals.svgHistory.length >= 24)
+  );
+}
+
+// A home tem exatamente o mesmo problema de verificação de segurança das
+// páginas de serviço, e é a mais visada. Por isso ela usa esta mesma espera,
+// com outro critério de pronto, em vez de uma versão simplificada sem
+// recarregar, sem avisar e sem trazer a aba para o foco.
+async function waitForPageSignals(tabId, abortSignal, options = {}) {
+  const isReady = typeof options.isReady === "function" ? options.isReady : hasServicePageSignals;
+  const maxAttempts = Number.isFinite(options.maxAttempts) ? options.maxAttempts : 45;
+
   let lastSignals = null;
   let notifiedCloudflare = false;
   let hasReloaded = false;
   let cloudflareBlockedCount = 0;
   let previousActiveTabId = null;
 
-  for (let attempt = 0; attempt < 45; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     if (abortSignal?.aborted) throw new Error("Abortado");
 
     try {
@@ -183,7 +209,7 @@ async function waitForPageSignals(tabId, abortSignal) {
       if (!hasReloaded) {
         hasReloaded = true;
         chrome.tabs.reload(tabId).catch(() => { });
-        await delay(5000); // Aguarda 5 segundos para a página recarregar e o Cloudflare processar
+        await delay(5000, abortSignal); // Aguarda 5 segundos para a página recarregar e o Cloudflare processar
         continue;
       }
 
@@ -212,14 +238,7 @@ async function waitForPageSignals(tabId, abortSignal) {
           priority: 2
         });
       }
-    } else if (
-      lastSignals?.reportPayload ||
-      // Mín 50 pontos: o React costuma popular o array completo de uma vez (96
-      // pontos), mas em alguns SSRs ele aparece parcial (10-30) e completa
-      // em ms. Aceitar parcial fazia o "current" ser um ponto velho do gráfico.
-      (Array.isArray(lastSignals?.reactChartData) && lastSignals.reactChartData.length >= 50) ||
-      (Array.isArray(lastSignals?.svgHistory) && lastSignals.svgHistory.length >= 24)
-    ) {
+    } else if (isReady(lastSignals)) {
 
       if (notifiedCloudflare && previousActiveTabId) {
         try {
@@ -233,22 +252,46 @@ async function waitForPageSignals(tabId, abortSignal) {
       return lastSignals;
     }
 
-    await delay(1000);
+    await delay(1000, abortSignal);
   }
 
   return lastSignals;
 }
 
-function getServiceUrls(slug, sourceSite) {
+// "complete" só indica que o documento terminou de carregar; a lista de
+// destaques é montada depois. Contar os serviços encontrados é o único sinal
+// confiável de montagem: um único link de status já existe no menu e no rodapé
+// desde o primeiro instante.
+function hasHomePageSignals(signals) {
+  return Boolean(signals?.isHomePage) &&
+    Array.isArray(signals?.trendingServices) &&
+    signals.trendingServices.length >= MIN_HOME_SERVICES_READY;
+}
+
+async function waitForHomeSignals(tabId, abortSignal) {
+  return waitForPageSignals(tabId, abortSignal, {
+    isReady: hasHomePageSignals,
+    maxAttempts: 12
+  });
+}
+
+function withWorkerMarker(url, isWorkerNavigation) {
+  return isWorkerNavigation ? `${url}${WORKER_PAGE_MARKER}` : url;
+}
+
+function getServiceUrls(slug, sourceSite, isWorkerNavigation = false) {
+  const safeSlug = sanitizeSlug(slug);
+  if (!safeSlug) throw new Error("Slug de serviço inválido.");
+
   if (sanitizeSourceSite(sourceSite) === "com") {
     return [
-      `https://downdetector.com/status/${slug}/`
+      withWorkerMarker(`https://downdetector.com/status/${safeSlug}/`, isWorkerNavigation)
     ];
   }
 
   return [
-    `https://downdetector.com.br/fora-do-ar/${slug}/`,
-    `https://downdetector.com.br/status/${slug}/`
+    withWorkerMarker(`https://downdetector.com.br/fora-do-ar/${safeSlug}/`, isWorkerNavigation),
+    withWorkerMarker(`https://downdetector.com.br/status/${safeSlug}/`, isWorkerNavigation)
   ];
 }
 
@@ -275,7 +318,7 @@ function extractHistoryFromSignals(signals) {
         return out;
       });
     if (history.length >= 12) {
-      return { payload: null, history, source: "react" };
+      return { payload: null, history, source: "react", authoritative: true };
     }
   }
 
@@ -284,20 +327,25 @@ function extractHistoryFromSignals(signals) {
   if (payload) {
     const history = extractHistoryFromPayload(payload);
     if (history.length) {
-      return { payload, history, source: "api" };
+      return {
+        payload,
+        history,
+        source: "api",
+        authoritative: hasAuthoritativeReportPayload(payload)
+      };
     }
   }
 
   // 3ª escolha: reconstrução do SVG (estimativa, não exato)
   if (Array.isArray(signals?.svgHistory) && signals.svgHistory.length >= 24) {
-    return { payload, history: signals.svgHistory.slice(-96), source: "svg" };
+    return { payload, history: signals.svgHistory.slice(-96), source: "svg", authoritative: false };
   }
 
-  return { payload, history: [], source: null };
+  return { payload, history: [], source: null, authoritative: false };
 }
 
 async function scrapeService(tabId, slug, sourceSite, abortSignal) {
-  const urls = getServiceUrls(slug, sourceSite);
+  const urls = getServiceUrls(slug, sourceSite, true);
   let lastError = null;
 
   for (const url of urls) {
@@ -314,23 +362,23 @@ async function scrapeService(tabId, slug, sourceSite, abortSignal) {
       // Tenta extrair imediatamente. React (chartData) e API (payload) ficam
       // disponíveis assim que o componente monta — não dependem de animação.
       let extracted = extractHistoryFromSignals(signals);
-      let { payload, history, source } = extracted;
+      let { payload, history, source, authoritative } = extracted;
 
       // Apenas o método SVG depende da animação Recharts terminar (~2s para
       // o path se estabilizar). Se a melhor fonte disponível é o SVG (ou
       // nada), aguardamos e tentamos de novo.
       if (!history.length || source === "svg") {
-        await delay(2000);
+        await delay(2000, abortSignal);
         signals = await readPageSignals(tabId);
         extracted = extractHistoryFromSignals(signals);
-        ({ payload, history, source } = extracted);
+        ({ payload, history, source, authoritative } = extracted);
 
         // Tentativas extras se ainda não veio nada (raro, página muito lenta)
         for (let attempt = 0; attempt < 3 && !history.length; attempt += 1) {
-          await delay(800);
+          await delay(800, abortSignal);
           signals = await readPageSignals(tabId);
           extracted = extractHistoryFromSignals(signals);
-          ({ payload, history, source } = extracted);
+          ({ payload, history, source, authoritative } = extracted);
         }
       }
 
@@ -355,7 +403,11 @@ async function scrapeService(tabId, slug, sourceSite, abortSignal) {
         source,
         iconUrls: Array.isArray(signals?.serviceIconUrls) ? signals.serviceIconUrls : [],
         periodLabel: signals?.periodLabel || "24h",
-        tickLabels: Array.isArray(signals?.tickLabels) ? signals.tickLabels : []
+        tickLabels: Array.isArray(signals?.tickLabels) ? signals.tickLabels : [],
+        // O payload só é autoritativo quando o schema conhecido foi visto;
+        // heurísticas de compatibilidade continuam úteis visualmente, mas não
+        // podem confirmar abertura ou recuperação de incidente.
+        authoritative: authoritative === true
       };
     } catch (error) {
       lastError = error;
@@ -381,7 +433,7 @@ async function scrapeServiceWithRetry(tabId, slug, sourceSite, abortSignal) {
       }
 
       console.warn(`Retry inteligente para ${slug}:`, error?.message || error);
-      await delay(900);
+      await delay(900, abortSignal);
     }
   }
 

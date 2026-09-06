@@ -23,3 +23,20 @@ const SERVICE_TIMEOUT_MS = 25000;
 const DEFAULT_TOP_SERVICES_COUNT = 5;
 const DEFAULT_TOP_SERVICES_ENABLED = true;
 const DEFAULT_TOP_SERVICES_THRESHOLD = 100;
+
+// Só a leitura exata muda alerta. Se o site mudar de formato e sobrar apenas a
+// estimativa do desenho, o monitoramento fica cego sem perceber. Depois deste
+// número de ciclos seguidos sem fonte exata, o serviço é marcado como cego e o
+// usuário é avisado uma vez.
+const MAX_CYCLES_WITHOUT_EXACT_READING = 3;
+
+// Erro de leitura preserva o alerta em aberto, senão uma falha momentânea
+// zeraria o incidente. Mas preservar para sempre trava o contador do ícone em
+// serviço que quebrou de vez. Passado este número de falhas seguidas, o alerta
+// é solto e o serviço volta a "desconhecido".
+const MAX_CONSECUTIVE_READ_FAILURES = 5;
+
+// Mínimo de serviços encontrados na página inicial para considerar que ela
+// terminou de montar. Um único link de status aparece no menu e no rodapé
+// antes da grade existir.
+const MIN_HOME_SERVICES_READY = 5;

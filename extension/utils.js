@@ -13,8 +13,40 @@ const TRANSIENT_SERVICE_ERROR_PATTERNS = [
   /tabs cannot be edited right now/i
 ];
 
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function delay(ms, abortSignal = null) {
+  if (!abortSignal) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  if (abortSignal.aborted) {
+    return Promise.reject(abortSignal.reason || new DOMException("Operação cancelada.", "AbortError"));
+  }
+
+  return new Promise((resolve, reject) => {
+    let timeoutId = null;
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      abortSignal.removeEventListener("abort", onAbort);
+    };
+
+    const onAbort = () => {
+      cleanup();
+      reject(abortSignal.reason || new DOMException("Operação cancelada.", "AbortError"));
+    };
+
+    timeoutId = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+
+    abortSignal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function sanitizeSlug(value) {
+  const slug = String(value ?? "").trim().toLowerCase();
+  return /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/.test(slug) ? slug : null;
 }
 
 function isRetryableServiceError(error) {
@@ -55,13 +87,21 @@ function toTimestamp(value) {
     const trimmed = value.trim();
     if (!trimmed) return null;
 
+    // Strings compostas só por dígitos são contagens ou timestamps Unix. O
+    // Date.parse aceita valores como "100" como o ano 0100, o que fazia uma
+    // contagem ser confundida com data e alterava a escolha da série.
+    if (/^\d+$/.test(trimmed)) {
+      const numeric = toCount(trimmed);
+      return Number.isFinite(numeric) ? toTimestamp(numeric) : null;
+    }
+
     const asDate = new Date(trimmed);
-    if (!Number.isNaN(asDate.getTime())) {
+    if (!Number.isNaN(asDate.getTime()) &&
+      asDate.getUTCFullYear() >= 2020 && asDate.getUTCFullYear() <= 2100) {
       return asDate.toISOString();
     }
 
-    const numeric = toCount(trimmed);
-    return Number.isFinite(numeric) ? toTimestamp(numeric) : null;
+    return null;
   }
 
   if (typeof value !== "number" || !Number.isFinite(value)) return null;

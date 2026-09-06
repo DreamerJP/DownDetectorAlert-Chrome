@@ -286,7 +286,10 @@ function renderStatus(statusMap, lastCheck) {
   for (const [slug, info] of sortedEntries) {
     let dotCls, badgeCls, badgeText, detail;
 
-    if (info.error) {
+    const hasLastReading = Number.isFinite(info.current);
+    const hasUnavailableReading = Boolean(info.error) && !hasLastReading;
+
+    if (hasUnavailableReading) {
       dotCls    = "unknown";
       badgeCls  = "badge-unknown";
       badgeText = "erro";
@@ -306,6 +309,12 @@ function renderStatus(statusMap, lastCheck) {
       badgeCls  = "badge-ok";
       badgeText = "normal";
       detail    = buildServiceDetail(info);
+    }
+
+    // Falha de leitura mantém o número e o gráfico da última vez que deu certo.
+    // Sem dizer de quando ele é, o usuário lê dado velho como se fosse de agora.
+    if (info.lastError && hasLastReading) {
+      detail = `${detail} · sem leitura nova${formatAge(info.lastSuccessfulAt || info.ts)}`;
     }
 
     const historyHtml = info.error
@@ -336,6 +345,11 @@ function renderStatus(statusMap, lastCheck) {
           </div>
           <div class="badge-row">
             ${info.isTrending ? `<div class="svc-badge badge-trending ${info.outage ? '' : 'badge-recovered'}" title="${info.outage ? 'Serviço identificado automaticamente pelo Downdetector' : 'Serviço normalizado, sairá da lista em breve'}">${info.outage ? 'Trending' : 'Recuperado'}</div>` : ''}
+            ${info.isBlind
+        ? `<div class="svc-badge badge-blind" title="O Downdetector parou de publicar o número exato deste serviço. Os avisos de queda estão suspensos até ele voltar.">Sem dado exato</div>`
+        : info.dataQuality === 'estimated'
+          ? `<div class="svc-badge badge-estimated" title="Valor estimado pelo desenho do gráfico. Não abre nem encerra aviso.">${info.needsExactConfirmation ? 'Confirmar' : 'Estimado'}</div>`
+          : ''}
             <div class="svc-badge ${badgeCls}">${escapeHtml(badgeText)}</div>
           </div>
         </div>
@@ -373,6 +387,20 @@ function renderStatus(statusMap, lastCheck) {
 }
 
 function pad(n) { return String(n).padStart(2, "0"); }
+
+// Idade do dado exibido, em texto curto, para nunca haver número na tela sem
+// referência de quando ele foi lido.
+function formatAge(timestamp) {
+  if (!Number.isFinite(timestamp)) return "";
+
+  const minutes = Math.floor((Date.now() - timestamp) / 60000);
+  if (minutes < 1) return " (agora)";
+  if (minutes < 60) return ` (há ${minutes} min)`;
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return ` (há ${hours} h)`;
+  return ` (há ${Math.floor(hours / 24)} d)`;
+}
 
 async function refreshStatus() {
   const data = await chrome.runtime.sendMessage({ type: "GET_STATUS" });
@@ -416,6 +444,7 @@ function applyProgressUi(data) {
     btn.disabled = false;
     btn.innerHTML = SVG_ICONS.refresh;
     document.getElementById("active-spinner")?.remove();
+    if (data.statusText) el.textContent = data.statusText;
     return;
   }
 
@@ -565,6 +594,23 @@ document.getElementById("btn-add").addEventListener("click", () => {
   panel.addEventListener("change", onMaybeDirty);
 })();
 
+// Um serviço rejeitado some da lista ao recarregar. Sem este aviso o usuário
+// veria "Salvo!" e a linha desaparecida, sem saber o motivo.
+function showRejectedServices(rejected) {
+  const box = document.getElementById("save-warning");
+  if (!box) return;
+
+  if (!Array.isArray(rejected) || rejected.length === 0) {
+    box.hidden = true;
+    box.textContent = "";
+    return;
+  }
+
+  const lines = rejected.map(item => `${item.label}: ${item.reason}`).join(" · ");
+  box.textContent = `Não foi salvo ${rejected.length === 1 ? "1 serviço" : `${rejected.length} serviços`}. ${lines}`;
+  box.hidden = false;
+}
+
 document.getElementById("btn-save").addEventListener("click", async () => {
   const btn = document.getElementById("btn-save");
   const config = {
@@ -575,10 +621,25 @@ document.getElementById("btn-save").addEventListener("click", async () => {
     top_services_threshold: parseInt(document.getElementById("top-threshold").value) || DEFAULT_TOP_SERVICES_THRESHOLD,
     services: currentServices.filter(s => s.slug)
   };
-  await chrome.runtime.sendMessage({ type: "SAVE_CONFIG", config });
-  clearDirty();
-  btn.innerHTML = `${SVG_ICONS.check}Salvo!`;
-  setTimeout(() => btn.textContent = "Salvar configurações", 1500);
+  btn.disabled = true;
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "SAVE_CONFIG", config });
+    if (!result?.ok) throw new Error(result?.error || "Não foi possível salvar.");
+
+    // Exibe exatamente a configuração já validada, para que endereço inválido
+    // ou repetido não fique aparentando que foi aceito.
+    await loadConfig();
+    clearDirty();
+    showRejectedServices(result.rejectedServices);
+    btn.innerHTML = `${SVG_ICONS.check}Salvo!`;
+    setTimeout(() => btn.textContent = "Salvar configurações", 1500);
+  } catch (error) {
+    console.warn("Falha ao salvar configuração", error);
+    btn.innerHTML = `${SVG_ICONS.warning}Falha ao salvar`;
+    setTimeout(() => btn.textContent = "Salvar configurações", 1800);
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 document.getElementById("top-enabled").addEventListener("change", e => {

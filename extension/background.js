@@ -74,6 +74,19 @@ function sendNotification(name, slug, current, threshold, eventType = "outage") 
   });
 }
 
+// Aviso de que o monitoramento de um serviço ficou cego: o número exato parou
+// de aparecer e só sobrou a estimativa tirada do desenho do gráfico, que não
+// tem precisão para abrir nem encerrar aviso.
+function sendBlindNotification(name, slug) {
+  chrome.notifications.create(`dd-${slug}-blind-${Date.now()}`, {
+    type: "basic",
+    iconUrl: "icons/icon128.png",
+    title: `❓ Sem dado exato: ${name}`,
+    message: "O Downdetector parou de publicar o número exato deste serviço. Só resta uma estimativa do gráfico, e por isso os avisos de queda estão suspensos.",
+    priority: 2
+  });
+}
+
 async function scheduleAlarm(triggerStartupDelay = false, forceReschedule = false) {
   const config = await ensureConfig();
   const { monitoringEnabled = true } = await chrome.storage.local.get("monitoringEnabled");
@@ -189,15 +202,35 @@ function resolveIconUrls(service, statusMap, resultIconUrls) {
 
 async function applyServiceResult(service, result, context) {
   const { statusMap, alertedSet, config } = context;
+  const previous = statusMap[service.slug] || null;
   const threshold = sanitizeThreshold(service.threshold);
   const isOutage = result.current >= threshold;
+  const authoritative = result.authoritative === true;
+  const wasAlerted = alertedSet.has(service.slug);
   const sourceTag = result.source ? ` [${result.source}]` : "";
+  const now = Date.now();
+
+  // Contagem de ciclos seguidos em que só a estimativa do desenho apareceu.
+  // Sem ela, o site poderia mudar de formato e o monitoramento ficaria mudo
+  // sem que nada na tela indicasse isso.
+  const exactMissStreak = authoritative ? 0 : (previous?.exactMissStreak || 0) + 1;
+  const isBlind = exactMissStreak >= MAX_CYCLES_WITHOUT_EXACT_READING;
+  const wasBlind = (previous?.exactMissStreak || 0) >= MAX_CYCLES_WITHOUT_EXACT_READING;
+
+  if (isBlind && !wasBlind) {
+    await addLog(`${shortName(service.name)}: sem leitura exata há ${exactMissStreak} ciclos. Avisos suspensos.`, "warn");
+    sendBlindNotification(service.name, service.slug);
+  } else if (wasBlind && authoritative) {
+    await addLog(`${shortName(service.name)}: leitura exata voltou. Avisos religados.`, "success");
+  }
 
   // Trending que não atingiu o limiar sai do popup para não poluir a lista.
-  if (service.isTrending && result.current < threshold) {
+  // Só uma leitura exata pode tirá-lo: a estimativa do desenho erra o valor e
+  // faria o serviço piscar dentro e fora da lista a cada ciclo.
+  if (service.isTrending && result.current < threshold && authoritative) {
     delete statusMap[service.slug];
     await addLog(`${shortName(service.name)}: ${result.current}/${threshold}${sourceTag}`, "success");
-    if (alertedSet.has(service.slug)) {
+    if (wasAlerted) {
       sendNotification(service.name, service.slug, result.current, threshold, "recovery");
       alertedSet.delete(service.slug);
     }
@@ -214,19 +247,38 @@ async function applyServiceResult(service, result, context) {
     tickLabels: result.tickLabels,
     sourceSite: config.source_site,
     threshold,
-    outage: isOutage,
+    // Enquanto uma recuperação estiver apenas estimada, preservamos o estado
+    // de alerta até a confirmação por React/payload. Assim o badge não some e
+    // não há falsa recuperação.
+    outage: authoritative ? isOutage : (wasAlerted ? true : isOutage),
+    observedOutage: isOutage,
+    dataQuality: authoritative ? "exact" : "estimated",
+    needsExactConfirmation: !authoritative && wasAlerted !== isOutage,
+    exactMissStreak,
+    isBlind,
+    failureStreak: 0,
+    source: result.source || null,
     isTrending: service.isTrending === true,
     iconUrls: resolveIconUrls(service, statusMap, result.iconUrls),
-    lastSeenTrending: statusMap[service.slug]?.lastSeenTrending,
-    ts: Date.now()
+    lastSeenTrending: previous?.lastSeenTrending,
+    lastError: null,
+    lastErrorAt: null,
+    lastAttemptAt: now,
+    lastSuccessfulAt: authoritative ? now : previous?.lastSuccessfulAt || null,
+    ts: now
   };
 
-  await addLog(`${shortName(service.name)}: ${result.current}/${threshold}${sourceTag}`, isOutage ? "error" : "success");
+  await addLog(
+    `${shortName(service.name)}: ${result.current}/${threshold}${sourceTag}${authoritative ? "" : " (estimativa; avisos preservados)"}`,
+    isOutage ? "error" : "success"
+  );
 
-  if (isOutage && !alertedSet.has(service.slug)) {
+  if (!authoritative) return;
+
+  if (isOutage && !wasAlerted) {
     sendNotification(service.name, service.slug, result.current, threshold, "outage");
     alertedSet.add(service.slug);
-  } else if (!isOutage && alertedSet.has(service.slug)) {
+  } else if (!isOutage && wasAlerted) {
     sendNotification(service.name, service.slug, result.current, threshold, "recovery");
     alertedSet.delete(service.slug);
   }
@@ -234,38 +286,75 @@ async function applyServiceResult(service, result, context) {
 
 async function applyServiceError(service, error, context) {
   const { statusMap, alertedSet, config } = context;
+  const previous = statusMap[service.slug] || null;
+  const hasPreviousReading = Number.isFinite(previous?.current);
+  const failureStreak = (previous?.failureStreak || 0) + 1;
+  const now = Date.now();
 
   await addLog(`Erro ao checar ${service.slug}: ${error.message}`, "error");
   console.error(`Erro ao checar ${service.slug}:`, error);
 
-  statusMap[service.slug] = {
+  const nextStatus = {
+    ...(previous || {}),
     name: service.name,
     threshold: sanitizeThreshold(service.threshold),
     sourceSite: config.source_site,
-    error: error.message,
     isTrending: service.isTrending === true,
     iconUrls: resolveIconUrls(service, statusMap, null),
-    lastSeenTrending: statusMap[service.slug]?.lastSeenTrending,
-    ts: Date.now()
+    lastSeenTrending: previous?.lastSeenTrending,
+    lastError: error.message,
+    lastErrorAt: now,
+    lastAttemptAt: now,
+    failureStreak,
+    // ts é a hora do dado, não da tentativa. Atualizá-lo aqui faria o gráfico
+    // antigo aparecer com carimbo de agora.
+    ts: previous?.ts || now
   };
-  alertedSet.delete(service.slug);
+
+  // Um erro de transporte/leitura não é recuperação. Mantemos a última leitura
+  // confiável e o conjunto de avisos em aberto para evitar tanto aviso
+  // duplicado quanto recuperação silenciosa no ciclo seguinte.
+  if (!hasPreviousReading) nextStatus.error = error.message;
+  else delete nextStatus.error;
+
+  // Preservar para sempre trava o contador do ícone num serviço que quebrou de
+  // vez (endereço morto, página que sumiu). Passado o teto de falhas seguidas,
+  // o aviso é solto e o serviço volta a desconhecido.
+  if (failureStreak >= MAX_CONSECUTIVE_READ_FAILURES) {
+    nextStatus.error = error.message;
+    nextStatus.outage = false;
+    delete nextStatus.current;
+    delete nextStatus.history;
+
+    if (alertedSet?.has(service.slug)) {
+      alertedSet.delete(service.slug);
+      await addLog(`${shortName(service.name)}: ${failureStreak} falhas seguidas. Aviso encerrado por falta de leitura.`, "warn");
+    }
+  }
+
+  statusMap[service.slug] = nextStatus;
 }
 
 async function performCheckAllServices() {
   const startTime = Date.now();
-  await chrome.storage.session.set({ logs: [] }); // Limpa logs anteriores para o novo ciclo
-  await addLog("Iniciando verificação de todos os serviços...", "info");
-
-  const config = await ensureConfig();
-  const { alerted = [], statusMap: previousStatusMap = {} } = await chrome.storage.local.get(["alerted", "statusMap"]);
-  const alertedSet = new Set(alerted);
-  const statusMap = { ...previousStatusMap };
-
-  const servicesToCheck = [...config.services];
   const abortSignal = activeCheckAbortController?.signal;
+  let config = null;
+  let alertedSet = new Set();
+  let statusMap = {};
+  let servicesToCheck = [];
+  let totalServices = 0;
+  let completed = 0;
+  let workerTabId = null;
+  let cancelled = false;
+  let fatalError = null;
+
+  const markCancelled = async () => {
+    if (cancelled) return;
+    cancelled = true;
+    await addLog("Verificação cancelada. Nenhum estado de alerta foi alterado.", "warn");
+  };
 
   // A aba é criada sob demanda, na primeira vez que alguém precisar dela.
-  let workerTabId = null;
   const ensureTab = async () => {
     if (workerTabId === null) {
       const tab = await getOrCreateWorkerTab();
@@ -275,121 +364,117 @@ async function performCheckAllServices() {
     return workerTabId;
   };
 
-  // Busca serviços em destaque (Trending) se habilitado
-  if (config.top_services_enabled) {
-    await addLog("Buscando serviços em destaque na home page...", "info");
+  try {
+    await chrome.storage.session.set({ logs: [] }); // Limpa logs anteriores para o novo ciclo
+    await addLog("Iniciando verificação de todos os serviços...", "info");
 
+    const stored = await chrome.storage.local.get(["alerted", "statusMap"]);
+    alertedSet = new Set(stored.alerted || []);
+    statusMap = { ...(stored.statusMap || {}) };
+    config = await ensureConfig();
+    servicesToCheck = [...config.services];
+
+    // Busca serviços em destaque (Trending) se habilitado.
+    if (config.top_services_enabled) {
+      await addLog("Buscando serviços em destaque na home page...", "info");
+      await persistProgress(statusMap, alertedSet, {
+        isChecking: true,
+        checkCompleted: 0,
+        checkTotal: servicesToCheck.length,
+        statusText: "Buscando tendências..."
+      });
+
+      let trendingServices = null;
+      try {
+        const baseHomeUrl = config.source_site === "com" ? "https://downdetector.com/" : "https://downdetector.com.br/";
+        const tabId = await ensureTab();
+        await updateTabAndWait(tabId, withWorkerMarker(baseHomeUrl, true), abortSignal);
+        const homeSignals = await waitForHomeSignals(tabId, abortSignal);
+        if (Array.isArray(homeSignals?.trendingServices)) trendingServices = homeSignals.trendingServices;
+      } catch (error) {
+        if (abortSignal?.aborted) {
+          await markCancelled();
+        } else {
+          await addLog(`Erro ao buscar tendências: ${error.message}`, "error");
+          console.error("Erro ao buscar serviços em destaque:", error);
+        }
+      }
+
+      if (!cancelled && Array.isArray(trendingServices)) {
+        const topCount = config.top_services_count || DEFAULT_TOP_SERVICES_COUNT;
+        const added = [];
+        for (const candidate of trendingServices) {
+          const slug = sanitizeSlug(candidate.slug);
+          if (added.length >= topCount) break;
+          if (!slug || servicesToCheck.some(existing => existing.slug === slug)) continue;
+          servicesToCheck.push({
+            ...candidate,
+            slug,
+            threshold: config.top_services_threshold || DEFAULT_TOP_SERVICES_THRESHOLD,
+            isTrending: true
+          });
+          added.push(candidate.name);
+        }
+
+        await addLog(
+          added.length > 0
+            ? `Home: +${added.length} serviços detectados (${added.map(name => shortName(name, 18)).join(", ")})`
+            : "Home: Nenhum serviço novo detectado.",
+          "info"
+        );
+      }
+    }
+
+    if (abortSignal?.aborted) await markCancelled();
+
+    // Limpeza de Trending antigo. Nunca a executamos em ciclo cancelado: a
+    // ausência de uma leitura completa não é evidência de que um item sumiu.
+    if (!cancelled) {
+      const now = Date.now();
+      const GRACE_PERIOD_MS = 30 * 60 * 1000;
+
+      for (const key of Object.keys(statusMap)) {
+        const info = statusMap[key];
+        if (config.services.some(service => service.slug === key)) continue;
+
+        // Só itens que nasceram da home participam do ciclo de retenção. Um
+        // serviço manual removido não pode ser reclassificado como Trending e
+        // continuar sendo monitorado indefinidamente.
+        if (info.isTrending !== true) {
+          delete statusMap[key];
+          alertedSet.delete(key);
+          continue;
+        }
+
+        const isCurrentlyTrending = servicesToCheck.some(service => service.slug === key && service.isTrending);
+        if (isCurrentlyTrending) {
+          info.lastSeenTrending = now;
+          continue;
+        }
+
+        if (info.outage || (Number.isFinite(info.current) && info.current >= info.threshold * WARNING_RATIO)) {
+          servicesToCheck.push({ slug: key, name: info.name, threshold: info.threshold, isTrending: true });
+          continue;
+        }
+
+        const lastSeen = info.lastSeenTrending || 0;
+        if (lastSeen === 0 || now - lastSeen > GRACE_PERIOD_MS) delete statusMap[key];
+        else servicesToCheck.push({ slug: key, name: info.name, threshold: info.threshold, isTrending: true });
+      }
+    }
+
+    totalServices = servicesToCheck.length;
     await persistProgress(statusMap, alertedSet, {
       isChecking: true,
       checkCompleted: 0,
-      checkTotal: servicesToCheck.length,
-      statusText: "Buscando tendências..."
-    });
-
-    let trendingServices = null;
-    try {
-      const homeUrl = config.source_site === "com" ? "https://downdetector.com/" : "https://downdetector.com.br/";
-      const tabId = await ensureTab();
-      await updateTabAndWait(tabId, homeUrl, abortSignal);
-      const homeSignals = await readPageSignals(tabId);
-      if (Array.isArray(homeSignals?.trendingServices)) {
-        trendingServices = homeSignals.trendingServices;
-      }
-    } catch (error) {
-      await addLog(`Erro ao buscar tendências: ${error.message}`, "error");
-      console.error("Erro ao buscar serviços em destaque:", error);
-    }
-
-    if (Array.isArray(trendingServices)) {
-      const topCount = config.top_services_count || DEFAULT_TOP_SERVICES_COUNT;
-
-      // Percorre a lista da home em ordem de posição.
-      // Pula serviços que já estão na lista manual (evita checagem dupla).
-      // Para quando atingir topCount serviços únicos adicionados.
-      const added = [];
-      for (const s of trendingServices) {
-        if (added.length >= topCount) break;
-        if (servicesToCheck.find(existing => existing.slug === s.slug)) continue;
-        servicesToCheck.push({
-          ...s,
-          threshold: config.top_services_threshold || DEFAULT_TOP_SERVICES_THRESHOLD,
-          isTrending: true
-        });
-        added.push(s.name);
-      }
-
-      if (added.length > 0) {
-        await addLog(`Home: +${added.length} serviços detectados (${added.map(n => shortName(n, 18)).join(", ")})`, "info");
-      } else {
-        await addLog("Home: Nenhum serviço novo detectado.", "info");
-      }
-    }
-  }
-
-  await persistProgress(statusMap, alertedSet, {
-    isChecking: true,
-    checkCompleted: 0,
-    checkTotal: servicesToCheck.length,
-    statusText: "" // Limpa o texto customizado para mostrar a contagem normal
-  });
-
-  // Limpeza inteligente de serviços antigos (Stale)
-  const now = Date.now();
-  const GRACE_PERIOD_MS = 30 * 60 * 1000; // 30 minutos de retenção após normalizar
-
-  for (const key of Object.keys(statusMap)) {
-    const info = statusMap[key];
-    const isManual = config.services.some(s => s.slug === key);
-
-    if (isManual) continue; // Nunca remove manuais
-
-    const isCurrentlyTrending = servicesToCheck.some(s => s.slug === key && s.isTrending);
-
-    if (isCurrentlyTrending) {
-      // Atualiza o timestamp de última vez visto como trending
-      info.lastSeenTrending = now;
-      continue;
-    }
-
-    // Se era trending mas sumiu da home:
-    // 1. Se ainda está em falha/alerta, mantém (precisamos monitorar até normalizar)
-    if (info.outage || (info.current >= info.threshold * WARNING_RATIO)) {
-      if (!servicesToCheck.some(s => s.slug === key)) {
-         servicesToCheck.push({ slug: key, name: info.name, threshold: info.threshold, isTrending: true });
-      }
-      continue;
-    }
-
-    // 2. Se já normalizou, verifica se passou o período de carência
-    const lastSeen = info.lastSeenTrending || 0;
-    if (lastSeen === 0 || now - lastSeen > GRACE_PERIOD_MS) {
-      delete statusMap[key];
-    } else {
-      // Mantém na lista de checagem para garantir que o status 'Normal' seja atualizado no popup
-      if (!servicesToCheck.some(s => s.slug === key)) {
-        servicesToCheck.push({ slug: key, name: info.name, threshold: info.threshold, isTrending: true });
-      }
-    }
-  }
-
-  const totalServices = servicesToCheck.length;
-  const context = { statusMap, alertedSet, config };
-  let completed = 0;
-
-  const reportProgress = async () => {
-    completed += 1;
-    await persistProgress(statusMap, alertedSet, {
-      isChecking: true,
-      checkCompleted: completed,
       checkTotal: totalServices,
-      lastCheck: Date.now()
+      statusText: ""
     });
-  };
 
-  try {
+    const context = { statusMap, alertedSet, config };
     for (const service of servicesToCheck) {
       if (abortSignal?.aborted) {
-        await addLog("Verificação cancelada pelo usuário.", "warn");
+        await markCancelled();
         break;
       }
 
@@ -405,11 +490,36 @@ async function performCheckAllServices() {
         const result = await scrapeServiceWithRetry(tabId, service.slug, config.source_site, serviceSignal);
         await applyServiceResult(service, result, context);
       } catch (error) {
+        if (abortSignal?.aborted) {
+          await markCancelled();
+          break;
+        }
         await applyServiceError(service, error, context);
       }
 
-      await reportProgress();
-      await delay(250);
+      completed += 1;
+      await persistProgress(statusMap, alertedSet, {
+        isChecking: true,
+        checkCompleted: completed,
+        checkTotal: totalServices
+      });
+
+      try {
+        await delay(250, abortSignal);
+      } catch (error) {
+        if (abortSignal?.aborted) {
+          await markCancelled();
+          break;
+        }
+        throw error;
+      }
+    }
+  } catch (error) {
+    if (abortSignal?.aborted) await markCancelled();
+    else {
+      fatalError = error;
+      await addLog(`Falha no ciclo: ${error.message}`, "error");
+      console.error("Falha no ciclo de verificação:", error);
     }
   } finally {
     // A aba pode não ter sido criada (lista vazia, ou cancelamento logo no início).
@@ -439,6 +549,30 @@ async function performCheckAllServices() {
     }
   }
 
+  // Interrupção e falha não escrevem texto no cabeçalho: ele voltaria a exibir
+  // "Verificação cancelada." toda vez que a janela fosse aberta, no lugar da
+  // hora da última checagem, até um ciclo inteiro terminar. O que aconteceu
+  // fica no registro de atividade.
+  if (cancelled) {
+    await persistProgress(statusMap, alertedSet, {
+      isChecking: false,
+      checkCompleted: completed,
+      checkTotal: totalServices,
+      statusText: ""
+    });
+    return { cancelled: true };
+  }
+
+  if (fatalError) {
+    await persistProgress(statusMap, alertedSet, {
+      isChecking: false,
+      checkCompleted: completed,
+      checkTotal: totalServices,
+      statusText: ""
+    });
+    throw fatalError;
+  }
+
   // Poda slugs que saíram da lista monitorada (ex: serviço removido da config
   // enquanto estava em falha). Sem isso o badge segue contando um serviço que
   // não é mais checado, e o número nunca volta a zero.
@@ -454,7 +588,8 @@ async function performCheckAllServices() {
     isChecking: false,
     checkCompleted: totalServices,
     checkTotal: totalServices,
-    lastCheck: Date.now()
+    lastCheck: Date.now(),
+    statusText: ""
   });
 }
 
@@ -494,6 +629,18 @@ async function checkAllServices(isAutomated = false) {
   return activeCheckPromise;
 }
 
+// Dispara a interrupção e devolve a promessa do ciclo morrendo, sem esperar.
+// Quem chama responde ao usuário na hora: a limpeza da aba leva segundos e
+// travava o botão de ligar/desligar e o de salvar até ela terminar.
+// Devolve null quando não havia nada em curso.
+function cancelActiveCheck(message) {
+  const runningPromise = activeCheckPromise;
+  if (!activeCheckAbortController || !runningPromise) return null;
+
+  activeCheckAbortController.abort(new DOMException(message, "AbortError"));
+  return runningPromise.catch(() => { });
+}
+
 // Campos voláteis de progresso — vão para storage.session (memória).
 // statusMap, alerted e lastCheck continuam em storage.local porque precisam
 // sobreviver ao restart do navegador (é o que o popup mostra antes da 1ª checagem).
@@ -530,11 +677,27 @@ async function persistProgress(statusMap, alertedSet, extra = {}) {
   }
 }
 
+async function pruneRemovedManualStatuses(config) {
+  const { alerted = [], statusMap = {} } = await chrome.storage.local.get(["alerted", "statusMap"]);
+  const configuredSlugs = new Set(config.services.map(service => service.slug));
+  const alertedSet = new Set(alerted);
+  let changed = false;
+
+  for (const [slug, info] of Object.entries(statusMap)) {
+    if (info?.isTrending === true || configuredSlugs.has(slug)) continue;
+    delete statusMap[slug];
+    alertedSet.delete(slug);
+    changed = true;
+  }
+
+  if (changed) await persistProgress(statusMap, alertedSet);
+}
+
 // Clicar na notificação abre a página do serviço. As notificações de Cloudflare
 // (dd-cf-*) não casam com o padrão e são ignoradas de propósito — nesse caso a
 // aba já é trazida para o foco por waitForPageSignals.
 chrome.notifications.onClicked.addListener(async notificationId => {
-  const match = /^dd-(.+)-(?:outage|recovery)-\d+$/.exec(notificationId);
+  const match = /^dd-(.+)-(?:outage|recovery|blind)-\d+$/.exec(notificationId);
   if (!match) return;
 
   try {
@@ -562,12 +725,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
 
   if (msg.type === "SAVE_CONFIG") {
     const config = normalizeConfig(msg.config || DEFAULT_CONFIG);
+    const rejectedServices = listRejectedServices(msg.config, config);
 
-    chrome.storage.sync.set({ config }).then(async () => {
-      // Aqui o reagendamento é forçado: o usuário pode ter mudado o intervalo.
-      await scheduleAlarm(false, true);
-      reply({ ok: true });
-    }).catch(error => reply({ ok: false, error: error.message }));
+    // O ciclo em andamento trabalha com uma cópia da configuração de quando
+    // começou. Interrompê-lo evita que ele grave resultado com limiar antigo.
+    const dyingCheck = cancelActiveCheck("Configuração alterada pelo usuário.");
+
+    chrome.storage.sync.set({ config })
+      .then(() => scheduleAlarm(false, true)) // Forçado: o intervalo pode ter mudado.
+      .then(() => reply({ ok: true, config, rejectedServices }))
+      .catch(error => reply({ ok: false, error: error.message }));
+
+    // Limpeza e retomada acontecem depois que o ciclo interrompido termina de
+    // gravar, senão ele ressuscitaria os serviços que acabaram de sair da lista.
+    Promise.resolve(dyingCheck)
+      .then(() => pruneRemovedManualStatuses(config))
+      .then(async () => {
+        if (!dyingCheck) return;
+        const { monitoringEnabled = true } = await chrome.storage.local.get("monitoringEnabled");
+        if (monitoringEnabled) await checkAllServices();
+      })
+      .catch(error => console.error("Falha ao aplicar a nova configuração:", error));
 
     return true;
   }
@@ -580,10 +758,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
         await scheduleAlarm();
       } else {
         await chrome.alarms.clearAll();
-        // Cancela checagem em curso para não desperdiçar recursos
-        if (activeCheckAbortController) {
-          activeCheckAbortController.abort();
-        }
+        cancelActiveCheck("Monitoramento desativado pelo usuário.");
       }
       reply({ ok: true, monitoringEnabled: enabled });
     }).catch(error => reply({ ok: false, error: error.message }));

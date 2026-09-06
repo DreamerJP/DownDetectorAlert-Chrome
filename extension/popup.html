@@ -202,6 +202,10 @@
   .badge-outage  { background: #ff4d4d18; color: var(--red);   border: 1px solid #ff4d4d40; }
   .badge-unknown { background: var(--muted-bg); color: var(--text); border: 1px solid var(--border); }
   .badge-trending { background: #4f8fff20; color: var(--accent); border: 1px solid #4f8fff50; margin-left: 6px; }
+  .badge-estimated { background: #94a3b818; color: var(--muted); border: 1px solid #94a3b840; }
+  .badge-blind { background: #ffb02e20; color: #ffb02e; border: 1px solid #ffb02e50; }
+  .save-warning { margin-top: 8px; padding: 8px 10px; border-radius: 6px; font-size: 11px; line-height: 1.4;
+                  background: #ffb02e14; color: #ffb02e; border: 1px solid #ffb02e40; }
   .badge-recovered { opacity: 0.6; filter: grayscale(0.5); font-style: italic; }
   .badge-row { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
@@ -417,7 +421,7 @@
       </button>
       <div class="info-content" id="info-content" hidden>
         Monitoramento em <strong>tempo real</strong> a partir dos dados exibidos pelo Downdetector.<br>
-        Avisa quando o número de reportes ultrapassa o <strong>limiar</strong> definido.
+        Avisa quando o número de reportes atinge ou ultrapassa o <strong>limiar</strong> definido.
       </div>
     </div>
 
@@ -484,6 +488,7 @@
     <!-- Salvar + autor -->
     <div class="config-section">
       <button class="btn-primary btn-save-wide" id="btn-save" style="width:100%; padding: 9px 12px; border-radius: 6px;">Salvar configurações</button>
+      <div class="save-warning" id="save-warning" hidden></div>
       <div class="author-note">by <a href="https://github.com/DreamerJP" target="_blank" rel="noreferrer">DreamerJP</a></div>
     </div>
 

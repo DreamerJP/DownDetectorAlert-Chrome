@@ -540,11 +540,9 @@
   // ============================================================
   disableRechartsAnimations();
 
-  // Marca a aba como worker da extensão. capture.js (content script, MAIN world)
-  // lê esta marca no document_start para só then aplicar os patches de rede e de
-  // visibilidade — sem isso ele mexeria também nas abas do Downdetector que o
-  // próprio usuário abre. sessionStorage é por aba e por origem, então a marca
-  // não vaza para outras abas.
+  // Reforça a marca da aba worker para navegações posteriores. A primeira
+  // navegação já é identificada por capture.js através do fragmento de URL,
+  // disponível no document_start.
   try { sessionStorage.setItem("__ddm_worker", "1"); } catch (_e) { }
 
   const cloudflareBlocked = detectCloudflareBlock();

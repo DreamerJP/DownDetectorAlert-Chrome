@@ -211,6 +211,31 @@ function collectHistoryCandidates(node, path = [], candidates = []) {
   return candidates;
 }
 
+// O seletor genérico abaixo é deliberadamente tolerante a mudanças de payload,
+// mas essa tolerância não deve conceder autoridade para notificar. Só marcamos
+// a fonte API como exata quando o schema conhecido de pontos está presente.
+function hasAuthoritativeReportPayload(payload) {
+  const pending = [payload];
+  const seen = new WeakSet();
+
+  while (pending.length) {
+    const node = pending.pop();
+    if (!node || typeof node !== "object") continue;
+    if (seen.has(node)) continue;
+    seen.add(node);
+
+    if (!Array.isArray(node) &&
+      Object.prototype.hasOwnProperty.call(node, "reportsValue") &&
+      Object.prototype.hasOwnProperty.call(node, "timestampUtc")) {
+      return true;
+    }
+
+    for (const value of Object.values(node)) pending.push(value);
+  }
+
+  return false;
+}
+
 function extractHistoryFromPayload(payload) {
   const candidates = collectHistoryCandidates(payload);
   if (!candidates.length) return [];
